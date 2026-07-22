@@ -115,24 +115,12 @@ export function ensureIssueWorktree(
         w.path?.includes(`/issue-${issueNumber}`),
     );
     if (existing) {
-      const terms = orcaJson(orcaCli, [
-        "terminal",
-        "list",
-        "--worktree",
-        `id:${existing.id}`,
-      ]);
-      let agentHandle: string | null = null;
-      if (terms.ok && terms.data) {
-        const tr = unwrapResult<{
-          terminals?: Array<{ handle: string; title?: string; preview?: string }>;
-        }>(terms.data);
-        // Prefer a terminal that looks like the agent.
-        const agentish = (tr.terminals ?? []).find((t) =>
-          (t.title ?? "").toLowerCase().includes(profile.orcaAgent),
-        );
-        agentHandle =
-          agentish?.handle ?? tr.terminals?.[0]?.handle ?? null;
-      }
+      const agentHandle = ensureAgentTerminal(
+        orcaCli,
+        existing.id,
+        profile,
+        `issue-${issueNumber}-${profile.orcaAgent}`,
+      );
       return {
         ok: true,
         value: {
@@ -146,6 +134,9 @@ export function ensureIssueWorktree(
     }
   }
 
+  // Create worktree WITHOUT --agent first. On this machine, combining
+  // --agent codex with worktree create repeatedly closed the Orca runtime.
+  // Launch the implementer terminal in a second step instead.
   const args = [
     "worktree",
     "create",
@@ -158,8 +149,6 @@ export function ensureIssueWorktree(
     repo.baseRef,
     "--issue",
     String(issueNumber),
-    "--agent",
-    profile.orcaAgent,
     "--setup",
     "skip",
     "--comment",
@@ -179,10 +168,6 @@ export function ensureIssueWorktree(
 
   const worktreeId = result.worktree?.id;
   const worktreePath = result.worktree?.path;
-  const agentTerminalHandle =
-    result.agentTerminalHandle ??
-    result.startupTerminal?.handle ??
-    null;
 
   if (!worktreeId || !worktreePath) {
     return {
@@ -190,6 +175,13 @@ export function ensureIssueWorktree(
       error: `worktree create missing id/path: ${created.raw.slice(0, 800)}`,
     };
   }
+
+  const agentTerminalHandle = ensureAgentTerminal(
+    orcaCli,
+    worktreeId,
+    profile,
+    `issue-${issueNumber}-${profile.orcaAgent}`,
+  );
 
   return {
     ok: true,
@@ -201,6 +193,68 @@ export function ensureIssueWorktree(
       raw: created.data,
     },
   };
+}
+
+/** Start or reuse an agent terminal inside an existing worktree. */
+/**
+ * Always create a fresh terminal for a named role session when forceNew is true
+ * (recommended for each audit round to avoid context anchoring).
+ */
+export function ensureAgentTerminal(
+  orcaCli: string,
+  worktreeId: string,
+  profile: AgentProfile,
+  title: string,
+  options: { forceNew?: boolean } = {},
+): string | null {
+  if (!options.forceNew) {
+    const listed = orcaJson(orcaCli, [
+      "terminal",
+      "list",
+      "--worktree",
+      `id:${worktreeId}`,
+    ]);
+    if (listed.ok && listed.data) {
+      const result = unwrapResult<{
+        terminals?: Array<{
+          handle: string;
+          title?: string;
+          connected?: boolean;
+        }>;
+      }>(listed.data);
+      const match = (result.terminals ?? []).find((t) => {
+        const ttitle = (t.title ?? "").toLowerCase();
+        return (
+          t.connected !== false &&
+          (ttitle === title.toLowerCase() ||
+            ttitle.includes(profile.orcaAgent.toLowerCase()))
+        );
+      });
+      if (match?.handle) return match.handle;
+    }
+  }
+
+  const command = profile.command ?? profile.orcaAgent;
+  const created = orcaJson(
+    orcaCli,
+    [
+      "terminal",
+      "create",
+      "--worktree",
+      `id:${worktreeId}`,
+      "--title",
+      title,
+      "--command",
+      command,
+    ],
+    { timeoutMs: 90_000 },
+  );
+  if (!created.ok || !created.data) return null;
+  const result = unwrapResult<{
+    handle?: string;
+    terminal?: { handle?: string };
+  }>(created.data);
+  return result.handle ?? result.terminal?.handle ?? null;
 }
 
 export function setWorktreeProgress(

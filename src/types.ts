@@ -43,6 +43,8 @@ export type HarnessConfig = {
   maxAuditRounds: number;
   /** Minutes to wait for implementer worker_done (M2). */
   implementTimeoutMinutes: number;
+  /** Minutes to wait for auditor worker_done (M3). */
+  auditTimeoutMinutes: number;
   mergePolicy: MergePolicy;
   orca: {
     cliPath: string;
@@ -97,6 +99,7 @@ export type JobState =
   | "awaiting_audit"
   | "auditing"
   | "reworking"
+  | "audit_passed"
   | "publishing"
   | "awaiting_merge"
   | "merged"
@@ -125,9 +128,14 @@ export type Job = {
   implementer_terminal_handle: string | null;
   implementer_task_id: string | null;
   implementer_dispatch_id: string | null;
+  auditor_profile_id: string | null;
+  auditor_terminal_handle: string | null;
+  auditor_task_id: string | null;
+  auditor_dispatch_id: string | null;
   controller_terminal_handle: string | null;
   audit_round: number;
   audit_result_json: string | null;
+  audit_head_sha: string | null;
   pr_number: number | null;
   pr_url: string | null;
   merged_at: string | null;
@@ -135,4 +143,30 @@ export type Job = {
   head_sha: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type AuditFinding = {
+  summary: string;
+  detail?: string;
+  /** Default true for hard findings; smells should set false. */
+  blocking?: boolean;
+};
+
+export type AuditResult = {
+  status: "pass" | "fail" | "uncertain";
+  base_sha: string;
+  head_sha: string;
+  standards: {
+    documented_standard_violations: AuditFinding[];
+    smell_judgement_calls: AuditFinding[];
+  };
+  spec: {
+    missing_or_partial: AuditFinding[];
+    incorrect_implementation: AuditFinding[];
+    scope_creep: AuditFinding[];
+  };
+  validation: {
+    commands: Array<{ command: string; exit_code: number; ok: boolean }>;
+  };
+  notes?: string;
 };

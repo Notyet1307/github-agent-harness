@@ -14,7 +14,8 @@ Picker → Ledger Claim → Orca Worktree → Codex $implement
 | M0 | `pnpm harness doctor` | implemented |
 | M1 | `pnpm harness pick --dry-run` | implemented |
 | M2 | `pnpm harness run-once` | implemented (stop after implement commits) |
-| M3+ | Pi audit / PR / merge wait | not yet |
+| M3 | `pnpm harness audit-once` | implemented (Pi dual-axis gate + rework; no PR) |
+| M4+ | PR / merge wait | not yet |
 
 ## Setup
 
@@ -24,6 +25,7 @@ pnpm install
 pnpm harness doctor
 pnpm harness pick --dry-run
 pnpm harness run-once          # claim + Orca worktree + implementer; no push/PR
+pnpm harness audit-once        # Pi dual-axis audit gate (+ rework loop); no PR
 pnpm harness status
 ```
 

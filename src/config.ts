@@ -44,6 +44,7 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
     controllerTitle: data.orca?.controllerTitle ?? "harness-controller",
   };
   data.implementTimeoutMinutes = data.implementTimeoutMinutes ?? 45;
+  data.auditTimeoutMinutes = data.auditTimeoutMinutes ?? 45;
   data.maxAuditRounds = data.maxAuditRounds ?? 3;
   data.maxConcurrentTotal = data.maxConcurrentTotal ?? 1;
   data.pollIntervalSeconds = data.pollIntervalSeconds ?? 120;

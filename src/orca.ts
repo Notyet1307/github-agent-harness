@@ -43,15 +43,21 @@ export function orcaJson(
   // Prefer last non-empty JSON object line (check --wait may be single JSON).
   const parsed = tryParseJson(result.stdout) ?? tryParseJson(result.stderr);
   if (parsed) {
-    const envelope = parsed as { ok?: boolean; error?: { message?: string } };
-    const ok =
-      result.ok && envelope.ok !== false && !envelope.error;
+    const envelope = parsed as {
+      ok?: boolean;
+      error?: { message?: string; code?: string } | string;
+    };
+    const errMsg =
+      typeof envelope.error === "string"
+        ? envelope.error
+        : envelope.error?.message;
+    const ok = result.ok && envelope.ok !== false && !envelope.error;
     return {
       ok,
       data: parsed,
       error: ok
         ? undefined
-        : envelope.error?.message || result.error || result.stderr || "orca failed",
+        : errMsg || result.error || result.stderr || "orca failed",
       raw,
       code: result.code,
     };

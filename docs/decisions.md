@@ -37,3 +37,13 @@ Controller owns business state (SQLite ledger). Orca owns runtime visibility.
 | Auditor | Profile `pi-reviewer` reserved | M3; supports alternate Pi provider dirs later |
 
 Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profiles** under `agentProfiles` + `activeProfiles`.
+
+## 2026-07-22 — M3 audit
+
+| Decision | Choice | Why |
+|---|---|---|
+| Pi subagent source | User global `npm:pi-sub-agent` | Project copy conflicts with global tool name |
+| Auditor model | `pi --provider baizhi-responses --model feature/gpt` | Default sol hits baizhi “Codex version too low” |
+| Gate input | `.harness/audit-result.json` schema | Natural-language worker_done is not machine-safe |
+| Smells | Non-blocking alone | Matches Matt dual-axis semantics |
+| M3 stop state | `audit_passed` | No PR until M4 |

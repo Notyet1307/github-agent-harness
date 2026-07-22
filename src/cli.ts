@@ -3,6 +3,7 @@ import { defaultConfigPath, loadConfig } from "./config.js";
 import { formatDoctorReport, runDoctor } from "./doctor.js";
 import { pickAll } from "./picker.js";
 import { runOnce } from "./run-once.js";
+import { auditOnce } from "./audit-once.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { defaultLedgerPath } from "./config.js";
@@ -14,14 +15,16 @@ Usage:
   harness doctor [--config path]
   harness pick --dry-run [--config path] [--repo OWNER/REPO]
   harness run-once [--config path] [--repo OWNER/REPO] [--issue N]
+  harness audit-once [--config path] [--no-rework]
   harness status [--config path]
   harness help
 
 Pipeline (V1):
   Picker → Ledger claim → Orca worktree → Implementer profile
-  → (M3) Auditor profile → Gate → PR → wait merge
+  → Auditor profile (Pi dual-axis) → Gate → (M4) PR → wait merge
 
-M2 run-once stops after implement commits (no push, no PR, no audit).
+M2 run-once stops after implement commits.
+M3 audit-once runs Pi dual-axis gate (+ optional rework loop); no PR.
 `;
 }
 
@@ -129,6 +132,19 @@ function main(argv: string[]): number {
       configPath,
       repoFilter: readFlag(args, "--repo"),
       issueNumber,
+    });
+    process.stdout.write(`\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`);
+    if (result.jobId) process.stdout.write(`job: ${result.jobId}\n`);
+    if (result.details) {
+      process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "audit-once") {
+    const result = auditOnce({
+      configPath,
+      withRework: !args.includes("--no-rework"),
     });
     process.stdout.write(`\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`);
     if (result.jobId) process.stdout.write(`job: ${result.jobId}\n`);

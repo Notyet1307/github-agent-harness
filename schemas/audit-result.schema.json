@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github-agent-harness.local/schemas/audit-result.schema.json",
+  "title": "AuditResult",
+  "type": "object",
+  "required": ["status", "base_sha", "head_sha", "standards", "spec", "validation"],
+  "additionalProperties": true,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail", "uncertain"]
+    },
+    "base_sha": { "type": "string", "minLength": 7 },
+    "head_sha": { "type": "string", "minLength": 7 },
+    "standards": {
+      "type": "object",
+      "required": ["documented_standard_violations", "smell_judgement_calls"],
+      "properties": {
+        "documented_standard_violations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "smell_judgement_calls": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": [
+        "missing_or_partial",
+        "incorrect_implementation",
+        "scope_creep"
+      ],
+      "properties": {
+        "missing_or_partial": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "incorrect_implementation": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        },
+        "scope_creep": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/finding" }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["command", "exit_code", "ok"],
+            "properties": {
+              "command": { "type": "string" },
+              "exit_code": { "type": "integer" },
+              "ok": { "type": "boolean" }
+            }
+          }
+        }
+      }
+    },
+    "notes": { "type": "string" }
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "required": ["summary"],
+      "properties": {
+        "summary": { "type": "string" },
+        "detail": { "type": "string" },
+        "blocking": { "type": "boolean" }
+      }
+    }
+  }
+}

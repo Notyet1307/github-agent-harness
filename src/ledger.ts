@@ -52,6 +52,19 @@ export class Ledger {
       );
       CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
     `);
+    this.ensureColumn("auditor_profile_id", "TEXT");
+    this.ensureColumn("auditor_terminal_handle", "TEXT");
+    this.ensureColumn("auditor_task_id", "TEXT");
+    this.ensureColumn("auditor_dispatch_id", "TEXT");
+    this.ensureColumn("audit_head_sha", "TEXT");
+  }
+
+  private ensureColumn(name: string, sqlType: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(jobs)`).all() as Array<{
+      name: string;
+    }>;
+    if (cols.some((c) => c.name === name)) return;
+    this.db.exec(`ALTER TABLE jobs ADD COLUMN ${name} ${sqlType}`);
   }
 
   hasActiveJob(): boolean {
@@ -244,9 +257,14 @@ export class Ledger {
         | "implementer_terminal_handle"
         | "implementer_task_id"
         | "implementer_dispatch_id"
+        | "auditor_profile_id"
+        | "auditor_terminal_handle"
+        | "auditor_task_id"
+        | "auditor_dispatch_id"
         | "controller_terminal_handle"
         | "audit_round"
         | "audit_result_json"
+        | "audit_head_sha"
         | "pr_number"
         | "pr_url"
         | "merged_at"

@@ -103,22 +103,37 @@ function runOnceLocked(
     if (
       job.state === "awaiting_audit" ||
       job.state === "auditing" ||
+      job.state === "reworking" ||
+      job.state === "audit_passed" ||
       job.state === "publishing" ||
       job.state === "awaiting_merge"
     ) {
       return {
         ok: true,
         jobId: job.id,
-        message: `job already past implement phase (state=${job.state}); M2 stops here`,
+        message: `job already past implement phase (state=${job.state}); use harness audit-once for M3`,
         details: { state: job.state, head_sha: job.head_sha },
       };
     }
     if (job.state === "blocked") {
-      return {
-        ok: false,
-        jobId: job.id,
-        message: `job is blocked: ${job.last_error ?? "no detail"}`,
-      };
+      // Allow automatic retry of blocked jobs that never got a worktree /
+      // never dispatched (transient Orca failures). Hard blocks after
+      // implement still need human cancel.
+      const retryable =
+        !job.implementer_task_id &&
+        (job.last_error ?? "").toLowerCase().includes("orca");
+      if (!retryable) {
+        return {
+          ok: false,
+          jobId: job.id,
+          message: `job is blocked: ${job.last_error ?? "no detail"}`,
+        };
+      }
+      log(`retrying blocked job after Orca error: ${job.last_error}`);
+      job = ledger.updateJob(job.id, {
+        state: "claimed",
+        last_error: null,
+      });
     }
   } else {
     const repos = options.repoFilter

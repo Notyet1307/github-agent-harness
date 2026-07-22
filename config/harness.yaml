@@ -6,6 +6,7 @@ pollIntervalSeconds: 120
 maxConcurrentTotal: 1
 maxAuditRounds: 3
 implementTimeoutMinutes: 45
+auditTimeoutMinutes: 45
 
 mergePolicy:
   mode: wait
@@ -36,8 +37,11 @@ agentProfiles:
     role: auditor
     runtime: orca
     orcaAgent: pi
+    # Avoid default sol model on baizhi gateway (Codex-version gate errors).
+    # Override anytime without code changes.
+    command: "pi --provider baizhi-responses --model feature/gpt"
     readonly: true
-    invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA."
+    invokeHint: "Explicitly invoke the matt-code-review-pi skill with the fixed base SHA (project skill under .pi/skills)."
 
   # Example future implementer (not active):
   # pi-implementer-a:
