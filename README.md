@@ -76,6 +76,16 @@ Routing (ensure*, not blind create):
 
 Invariants: no double claim, no double worktree, no double PR, no skip audit, no next issue until merged.
 
+### Dispatch acceptance (anti “agent 没反应”)
+
+Before dispatch, harness requires `tui-idle`. After every `orchestration dispatch --inject`, it probes the agent terminal (~45s) for:
+
+- the exact task id in retained output
+- fresh cursor output showing the worker preamble / Working
+- TUI leaving idle
+
+Confirmed silent-idle or provider/model startup failures **fail the old task, recreate the agent terminal once, and re-dispatch**. Interactive gates and unavailable/ambiguous probes are not retried automatically; their dispatch provenance stays in the ledger so `recover` can resume safely. Used by implement, audit, and rework paths.
+
 Config: `config/harness.yaml`.
 
 ### Agent profiles

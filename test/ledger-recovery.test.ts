@@ -30,6 +30,10 @@ test("single-slot: second claim fails while active job exists", () => {
       implementerProfileId: "codex-default",
     });
     assert.equal(a.ok, true);
+    if (a.ok) {
+      assert.equal(a.job.dispatch_attempt, 0);
+      assert.equal(a.job.dispatch_probe_pending, 0);
+    }
 
     const b = ledger.tryClaim({
       id: "job-b",
@@ -87,6 +91,10 @@ test("after merged, same issue can be re-claimed (new attempt)", () => {
       implementerProfileId: "codex-default",
     });
     assert.equal(a.ok, true);
+    ledger.updateJob("job-a", {
+      dispatch_attempt: 2,
+      dispatch_probe_pending: 1,
+    });
     ledger.updateJob("job-a", { state: "merged", merged_at: new Date().toISOString() });
 
     const b = ledger.tryClaim({
@@ -97,7 +105,11 @@ test("after merged, same issue can be re-claimed (new attempt)", () => {
       implementerProfileId: "codex-default",
     });
     assert.equal(b.ok, true);
-    if (b.ok) assert.equal(b.job.state, "claimed");
+    if (b.ok) {
+      assert.equal(b.job.state, "claimed");
+      assert.equal(b.job.dispatch_attempt, 0);
+      assert.equal(b.job.dispatch_probe_pending, 0);
+    }
   } finally {
     ledger.close();
     rmSync(dir, { recursive: true, force: true });

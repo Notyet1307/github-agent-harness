@@ -143,6 +143,10 @@ export type Job = {
   auditor_terminal_handle: string | null;
   auditor_task_id: string | null;
   auditor_dispatch_id: string | null;
+  /** Attempt number for the currently active role dispatch (0 = none). */
+  dispatch_attempt: number;
+  /** 1 while dispatch acceptance is not yet confirmed. */
+  dispatch_probe_pending: number;
   controller_terminal_handle: string | null;
   audit_round: number;
   audit_result_json: string | null;

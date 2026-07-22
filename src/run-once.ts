@@ -20,12 +20,11 @@ import { pickForRepo } from "./picker.js";
 import { renderImplementerSpec } from "./prompts.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import {
-  createOrchestrationTask,
-  dispatchTask,
+  dispatchTaskEnsured,
+  ensureAgentTerminal,
   ensureControllerTerminal,
   ensureIssueWorktree,
   setWorktreeProgress,
-  waitTerminalIdle,
   waitWorkerDone,
 } from "./orca-runtime.js";
 import type { HarnessConfig, Job, RepoConfig } from "./types.js";
@@ -307,21 +306,9 @@ function runOnceLocked(
     };
   }
 
-  // 4) Wait TUI idle before dispatch (only if not already implementing with task)
-  if (!job.implementer_task_id) {
-    log(`waiting implementer TUI idle: ${job.implementer_terminal_handle}`);
-    const idle = waitTerminalIdle(
-      orcaCli,
-      job.implementer_terminal_handle,
-      90_000,
-    );
-    if (!idle.ok) {
-      log(`warn: tui-idle wait: ${idle.error} (continuing to dispatch)`);
-    }
-  }
-
-  // 5) Create + dispatch implement task
-  if (!job.implementer_task_id) {
+  // 4) Create/dispatch and confirm that the agent accepted the task.
+  // If the controller crashed during the probe window, resume that task first.
+  if (!job.implementer_task_id || job.dispatch_probe_pending === 1) {
     if (!job.base_sha || !job.branch || !job.worktree_path) {
       return {
         ok: false,
@@ -342,46 +329,83 @@ function runOnceLocked(
       invokeHint: implementer.invokeHint,
     });
 
-    const task = createOrchestrationTask(orcaCli, {
+    const jobId = job.id;
+    const worktreeId = job.worktree_id;
+    const issueNumber = job.issue_number;
+    const existingDispatch =
+      job.dispatch_probe_pending === 1 && job.implementer_task_id
+        ? {
+            taskId: job.implementer_task_id,
+            dispatchId: job.implementer_dispatch_id,
+            to: job.implementer_terminal_handle,
+            attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
+          }
+        : undefined;
+    const ensured = dispatchTaskEnsured(orcaCli, {
       title: `Implement ${repo.github}#${job.issue_number}`,
       displayName: `issue-${job.issue_number}-implement`,
       spec,
-    });
-    if (!task.ok) {
-      job = ledger.updateJob(job.id, {
-        state: "blocked",
-        last_error: task.error,
-      });
-      return { ok: false, jobId: job.id, message: task.error };
-    }
-
-    const disp = dispatchTask(orcaCli, {
-      taskId: task.value.taskId,
       to: job.implementer_terminal_handle,
       from: job.controller_terminal_handle!,
+      onLog: log,
+      existingDispatch,
+      onDispatched: (event) => {
+        job = ledger.updateJob(jobId, {
+          state: "implementing",
+          implementer_terminal_handle: event.to,
+          implementer_task_id: event.taskId,
+          implementer_dispatch_id: event.dispatchId,
+          dispatch_attempt: event.attempt,
+          dispatch_probe_pending: 1,
+          last_error: null,
+        });
+      },
+      recreateAgentTerminal: () => {
+        if (!worktreeId) return null;
+        return ensureAgentTerminal(
+          orcaCli,
+          worktreeId,
+          implementer,
+          `issue-${issueNumber}-${implementer.orcaAgent}`,
+          { forceNew: true },
+        );
+      },
     });
-    if (!disp.ok) {
+    if (!ensured.ok) {
+      const exhausted = ensured.kind === "exhausted";
       job = ledger.updateJob(job.id, {
-        state: "blocked",
-        last_error: disp.error,
-        implementer_task_id: task.value.taskId,
+        state: exhausted ? "blocked" : job.state,
+        last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
+        implementer_terminal_handle: ensured.to,
+        dispatch_probe_pending:
+          exhausted || !job.implementer_task_id ? 0 : 1,
       });
-      return { ok: false, jobId: job.id, message: disp.error };
+      setWorktreeProgress(
+        orcaCli,
+        job.worktree_id!,
+        `harness: dispatch ${ensured.kind} — ${ensured.error}`.slice(0, 180),
+        "in-progress",
+      );
+      return { ok: false, jobId: job.id, message: ensured.error };
     }
 
     job = ledger.updateJob(job.id, {
       state: "implementing",
-      implementer_task_id: task.value.taskId,
-      implementer_dispatch_id: disp.value.dispatchId,
+      implementer_task_id: ensured.taskId,
+      implementer_dispatch_id: ensured.dispatchId,
+      implementer_terminal_handle: ensured.to,
+      dispatch_attempt: ensured.attempt,
+      dispatch_probe_pending: 0,
+      last_error: null,
     });
     setWorktreeProgress(
       orcaCli,
       job.worktree_id!,
-      `harness: implementing via ${implementer.id}`,
+      `harness: implementing via ${implementer.id} (dispatch attempt ${ensured.attempt})`,
       "in-progress",
     );
     log(
-      `dispatched task=${task.value.taskId} dispatch=${disp.value.dispatchId ?? "?"}`,
+      `dispatch ok attempt=${ensured.attempt} task=${ensured.taskId} dispatch=${ensured.dispatchId ?? "?"} (${ensured.acceptReason})`,
     );
   } else {
     log(
@@ -523,6 +547,8 @@ function runOnceLocked(
   job = ledger.updateJob(job.id, {
     state: "awaiting_audit",
     head_sha: headSha,
+    dispatch_attempt: 0,
+    dispatch_probe_pending: 0,
     last_error: null,
   });
   setWorktreeProgress(

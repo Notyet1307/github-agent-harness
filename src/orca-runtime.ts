@@ -1,5 +1,10 @@
 import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
 import { orcaJson, unwrapResult } from "./orca.js";
+import { execFile } from "./exec.js";
+import {
+  verdictDispatchAccepted,
+  type TerminalProbeSnapshot,
+} from "./dispatch-probe.js";
 
 export type WorktreeCreateResult = {
   worktreeId: string;
@@ -28,6 +33,14 @@ export type OrchestrationMessage = {
   body?: string;
   subject?: string;
   [key: string]: unknown;
+};
+
+type DispatchAttemptFailure = {
+  ok: false;
+  error: string;
+  kind: "retryable" | "interactive" | "unknown";
+  taskId?: string;
+  dispatchId?: string | null;
 };
 
 export function ensureControllerTerminal(
@@ -282,7 +295,12 @@ export function waitTerminalIdle(
   orcaCli: string,
   handle: string,
   timeoutMs = 60_000,
-): { ok: boolean; error?: string } {
+): {
+  ok: boolean;
+  error?: string;
+  satisfied?: boolean;
+  blockedReason?: string | null;
+} {
   const r = orcaJson(
     orcaCli,
     [
@@ -297,10 +315,515 @@ export function waitTerminalIdle(
     ],
     { timeoutMs: timeoutMs + 5_000 },
   );
-  if (!r.ok) {
-    return { ok: false, error: r.error ?? "terminal wait failed" };
+  const wait = extractWait(r.data);
+  if (wait.satisfied == null) {
+    return {
+      ok: false,
+      error: r.error ?? "terminal wait missing result.wait.satisfied",
+      ...wait,
+    };
   }
-  return { ok: true };
+  // satisfied true = became idle; false = timed out still busy
+  return {
+    ok: true,
+    satisfied: wait.satisfied,
+    blockedReason: wait.blockedReason,
+  };
+}
+
+export function probeTerminal(
+  orcaCli: string,
+  handle: string,
+  cursor: string | null = null,
+): TerminalProbeSnapshot {
+  let title = "";
+  let preview = "";
+  let tailText = "";
+  let idle: boolean | null = null;
+  let blockedReason: string | null = null;
+  let observed = false;
+
+  const shown = orcaJson(orcaCli, ["terminal", "show", "--terminal", handle]);
+  if (shown.ok && shown.data) {
+    observed = true;
+    const result = unwrapResult<{
+      terminal?: {
+        title?: string;
+        preview?: string;
+        handle?: string;
+      };
+      title?: string;
+      preview?: string;
+    }>(shown.data);
+    const t = result.terminal ?? result;
+    title = String(t.title ?? "");
+    preview = String(t.preview ?? "");
+  }
+
+  const readArgs = ["terminal", "read", "--terminal", handle];
+  if (cursor) readArgs.push("--cursor", cursor);
+  const read = orcaJson(orcaCli, readArgs);
+  if (read.ok && read.data) {
+    observed = true;
+    const result = unwrapResult<{
+      terminal?: { tail?: string[]; title?: string; preview?: string };
+    }>(read.data);
+    const tail = result.terminal?.tail ?? [];
+    tailText = tail.join("\n");
+    if (!title && result.terminal?.title) title = result.terminal.title;
+    if (!preview && result.terminal?.preview) {
+      preview = result.terminal.preview;
+    }
+  }
+
+  // Short non-blocking-ish idle probe (2s)
+  const idleProbe = waitTerminalIdle(orcaCli, handle, 2_000);
+  if (idleProbe.satisfied === true) {
+    observed = true;
+    idle = true;
+    blockedReason = idleProbe.blockedReason ?? null;
+  } else if (idleProbe.satisfied === false) {
+    observed = true;
+    idle = false;
+    blockedReason = idleProbe.blockedReason ?? null;
+  } else if (idleProbe.blockedReason) {
+    blockedReason = idleProbe.blockedReason;
+  }
+
+  // list may have fresher title/preview
+  // (optional — already have show/read)
+
+  return {
+    title,
+    preview,
+    tailText,
+    freshOutput: Boolean(cursor && read.ok),
+    observed,
+    idle,
+    blockedReason,
+  };
+}
+
+/**
+ * After dispatch --inject, poll until the agent shows acceptance signals
+ * or the window expires.
+ */
+export function awaitDispatchAccepted(
+  orcaCli: string,
+  handle: string,
+  taskId: string,
+  options: {
+    timeoutMs?: number;
+    pollMs?: number;
+    cursor?: string | null;
+    onTick?: (info: string) => void;
+  } = {},
+): {
+  accepted: boolean;
+  reason: string;
+  interactive?: boolean;
+  retryable?: boolean;
+  unknown?: boolean;
+} {
+  const timeoutMs = options.timeoutMs ?? 45_000;
+  const pollMs = options.pollMs ?? 3_000;
+  const deadline = Date.now() + timeoutMs;
+  let lastReason = "probe window not started";
+  let sawIdle = false;
+  let sawObservation = false;
+
+  while (Date.now() < deadline) {
+    const snap = probeTerminal(orcaCli, handle, options.cursor ?? null);
+    const verdict = verdictDispatchAccepted(snap, taskId);
+    sawIdle ||= snap.idle === true;
+    sawObservation ||= snap.observed;
+    lastReason = verdict.reason;
+    options.onTick?.(
+      `dispatch-probe: accepted=${verdict.accepted} — ${verdict.reason}`,
+    );
+    if (verdict.accepted) {
+      return {
+        accepted: true,
+        reason: verdict.reason,
+      };
+    }
+    if ("interactive" in verdict && verdict.interactive) {
+      return {
+        accepted: false,
+        reason: verdict.reason,
+        interactive: true,
+      };
+    }
+    if ("retryable" in verdict && verdict.retryable) {
+      return {
+        accepted: false,
+        reason: verdict.reason,
+        retryable: true,
+      };
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    sleepMs(Math.min(pollMs, remaining));
+  }
+
+  if (sawIdle) {
+    return { accepted: false, reason: lastReason, retryable: true };
+  }
+  return {
+    accepted: false,
+    reason: sawObservation
+      ? `${lastReason}; terminal never confirmed idle`
+      : "terminal acceptance probe unavailable",
+    unknown: true,
+  };
+}
+
+export function failOrchestrationTask(
+  orcaCli: string,
+  taskId: string,
+): { ok: true } | { ok: false; error: string } {
+  const result = orcaJson(orcaCli, [
+    "orchestration",
+    "task-update",
+    "--id",
+    taskId,
+    "--status",
+    "failed",
+  ]);
+  return result.ok
+    ? { ok: true }
+    : { ok: false, error: result.error ?? "task-update failed" };
+}
+
+/**
+ * Create task + dispatch + confirm agent started.
+ * On silent-idle failure: fail task, optionally new terminal, one automatic re-dispatch.
+ */
+export function dispatchTaskEnsured(
+  orcaCli: string,
+  input: {
+    title: string;
+    displayName: string;
+    spec: string;
+    to: string;
+    from: string;
+    /** Probe window after each dispatch. Default 45s. */
+    probeTimeoutMs?: number;
+    /** Agent must reach tui-idle before a task is created. */
+    idleTimeoutMs?: number;
+    onLog?: (line: string) => void;
+    /** Persist dispatch provenance before acceptance probing begins. */
+    onDispatched?: (event: {
+      taskId: string;
+      dispatchId: string | null;
+      to: string;
+      attempt: 1 | 2;
+    }) => void;
+    /** Resume the acceptance probe for provenance already stored in the ledger. */
+    existingDispatch?: {
+      taskId: string;
+      dispatchId: string | null;
+      to: string;
+      attempt: 1 | 2;
+    };
+    /** Called before second attempt; return replacement agent handle or null. */
+    recreateAgentTerminal?: () => string | null;
+  },
+):
+  | {
+      ok: true;
+      taskId: string;
+      dispatchId: string | null;
+      to: string;
+      attempt: 1 | 2;
+      acceptReason: string;
+    }
+  | {
+      ok: false;
+      error: string;
+      to: string;
+      lastTaskId?: string;
+      kind: "not-ready" | "interactive" | "unknown" | "exhausted";
+    } {
+  const log = input.onLog ?? (() => {});
+  const probeTimeoutMs = input.probeTimeoutMs ?? 45_000;
+
+  if (!input.existingDispatch) {
+    const ready = waitTerminalIdle(
+      orcaCli,
+      input.to,
+      input.idleTimeoutMs ?? 90_000,
+    );
+    if (!ready.ok || ready.satisfied !== true) {
+      return {
+        ok: false,
+        error:
+          ready.error ??
+          ready.blockedReason ??
+          "agent terminal did not reach tui-idle before dispatch",
+        to: input.to,
+        kind: ready.blockedReason ? "interactive" : "not-ready",
+      };
+    }
+  }
+
+  const probeOnce = (
+    to: string,
+    taskId: string,
+    dispatchId: string | null,
+    attempt: 1 | 2,
+    cursor: string | null,
+  ):
+    | {
+        ok: true;
+        taskId: string;
+        dispatchId: string | null;
+        to: string;
+        attempt: 1 | 2;
+        acceptReason: string;
+      }
+    | DispatchAttemptFailure => {
+    const accepted = awaitDispatchAccepted(orcaCli, to, taskId, {
+      timeoutMs: probeTimeoutMs,
+      cursor,
+      onTick: (info) => log(info),
+    });
+
+    if (accepted.accepted) {
+      log(`dispatch accepted (attempt ${attempt}): ${accepted.reason}`);
+      return {
+        ok: true,
+        taskId,
+        dispatchId,
+        to,
+        attempt,
+        acceptReason: accepted.reason,
+      };
+    }
+
+    if (accepted.interactive || accepted.unknown || !accepted.retryable) {
+      return {
+        ok: false,
+        error: accepted.reason,
+        kind: accepted.interactive ? "interactive" : "unknown",
+        taskId,
+        dispatchId,
+      };
+    }
+
+    log(`dispatch NOT accepted (attempt ${attempt}): ${accepted.reason}`);
+    const failed = failOrchestrationTask(orcaCli, taskId);
+    if (!failed.ok) {
+      return {
+        ok: false,
+        error: `dispatch was idle but task could not be failed: ${failed.error}`,
+        kind: "unknown",
+        taskId,
+        dispatchId,
+      };
+    }
+    return {
+      ok: false,
+      error: accepted.reason,
+      kind: "retryable",
+      taskId,
+      dispatchId,
+    };
+  };
+
+  const attemptOnce = (
+    to: string,
+    attempt: 1 | 2,
+  ):
+    | {
+        ok: true;
+        taskId: string;
+        dispatchId: string | null;
+        to: string;
+        attempt: 1 | 2;
+        acceptReason: string;
+      }
+    | DispatchAttemptFailure => {
+    const cursor = terminalCursor(orcaCli, to);
+    const task = createOrchestrationTask(orcaCli, {
+      title:
+        attempt === 1 ? input.title : `${input.title} (redispatch)`,
+      displayName:
+        attempt === 1
+          ? input.displayName
+          : `${input.displayName}-retry`,
+      spec: input.spec,
+    });
+    if (!task.ok) {
+      return { ok: false, error: task.error, kind: "unknown" };
+    }
+
+    log(
+      `dispatch attempt ${attempt}: task=${task.value.taskId} → ${to}`,
+    );
+    const disp = dispatchTask(orcaCli, {
+      taskId: task.value.taskId,
+      to,
+      from: input.from,
+    });
+    if (!disp.ok) {
+      failOrchestrationTask(orcaCli, task.value.taskId);
+      return {
+        ok: false,
+        error: disp.error,
+        kind: "unknown",
+        taskId: task.value.taskId,
+      };
+    }
+
+    try {
+      input.onDispatched?.({
+        taskId: task.value.taskId,
+        dispatchId: disp.value.dispatchId,
+        to,
+        attempt,
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        error: `failed to persist dispatch provenance: ${(err as Error).message}`,
+        kind: "unknown",
+        taskId: task.value.taskId,
+        dispatchId: disp.value.dispatchId,
+      };
+    }
+
+    return probeOnce(
+      to,
+      task.value.taskId,
+      disp.value.dispatchId,
+      attempt,
+      cursor,
+    );
+  };
+
+  const existing = input.existingDispatch;
+  const first = existing
+    ? probeOnce(
+        existing.to,
+        existing.taskId,
+        existing.dispatchId,
+        existing.attempt,
+        null,
+      )
+    : attemptOnce(input.to, 1);
+  if (first.ok) return first;
+
+  const firstTo = existing?.to ?? input.to;
+
+  if (first.kind !== "retryable") {
+    return {
+      ok: false,
+      error: first.error,
+      to: firstTo,
+      lastTaskId: first.taskId,
+      kind: first.kind,
+    };
+  }
+
+  if (existing?.attempt === 2) {
+    return {
+      ok: false,
+      error: `dispatch not accepted after 2 attempts: ${first.error}`,
+      to: firstTo,
+      lastTaskId: first.taskId,
+      kind: "exhausted",
+    };
+  }
+
+  log(`re-dispatch after failed acceptance: ${first.error}`);
+
+  const to = input.recreateAgentTerminal?.() ?? null;
+  if (!to) {
+    return {
+      ok: false,
+      error: "dispatch was idle but replacement agent terminal could not be created",
+      to: firstTo,
+      lastTaskId: first.taskId,
+      kind: "not-ready",
+    };
+  }
+  log(`recreated agent terminal: ${to}`);
+  const idle = waitTerminalIdle(
+    orcaCli,
+    to,
+    input.idleTimeoutMs ?? 90_000,
+  );
+  if (!idle.ok || idle.satisfied !== true) {
+    return {
+      ok: false,
+      error:
+        idle.error ??
+        idle.blockedReason ??
+        "replacement agent terminal did not reach tui-idle",
+      to,
+      lastTaskId: first.taskId,
+      kind: idle.blockedReason ? "interactive" : "not-ready",
+    };
+  }
+
+  const second = attemptOnce(to, 2);
+  if (second.ok) return second;
+
+  if (second.kind !== "retryable") {
+    return {
+      ok: false,
+      error: second.error,
+      to,
+      lastTaskId: second.taskId ?? first.taskId,
+      kind: second.kind,
+    };
+  }
+
+  return {
+    ok: false,
+    error: `dispatch not accepted after 2 attempts: ${second.error}`,
+    to,
+    lastTaskId: second.taskId ?? first.taskId,
+    kind: "exhausted",
+  };
+}
+
+function terminalCursor(orcaCli: string, handle: string): string | null {
+  const read = orcaJson(orcaCli, ["terminal", "read", "--terminal", handle]);
+  if (!read.ok || !read.data) return null;
+  const result = unwrapResult<{
+    terminal?: { nextCursor?: string | number | null; latestCursor?: string | number | null };
+  }>(read.data);
+  const cursor = result.terminal?.nextCursor ?? result.terminal?.latestCursor;
+  return cursor == null ? null : String(cursor);
+}
+
+function extractWait(data: unknown): {
+  satisfied?: boolean;
+  blockedReason?: string | null;
+} {
+  if (!data) return {};
+  const result = unwrapResult<{
+    wait?: {
+      satisfied?: boolean;
+      blockedReason?: string | null;
+      status?: string;
+    };
+  }>(data);
+  const w = result.wait;
+  if (!w) return {};
+  return {
+    satisfied: w.satisfied,
+    blockedReason: w.blockedReason ?? null,
+  };
+}
+
+function sleepMs(ms: number): void {
+  if (ms <= 0) return;
+  execFile("sleep", [String(Math.max(0.001, ms / 1000))], {
+    timeoutMs: ms + 2_000,
+  });
 }
 
 export function createOrchestrationTask(

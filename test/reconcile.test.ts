@@ -25,6 +25,8 @@ function job(partial: Partial<Job> & { state: Job["state"] }): Job {
     auditor_terminal_handle: null,
     auditor_task_id: null,
     auditor_dispatch_id: null,
+    dispatch_attempt: 0,
+    dispatch_probe_pending: 0,
     controller_terminal_handle: null,
     audit_round: 0,
     audit_result_json: null,

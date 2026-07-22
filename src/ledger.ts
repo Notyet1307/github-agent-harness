@@ -57,6 +57,8 @@ export class Ledger {
     this.ensureColumn("auditor_task_id", "TEXT");
     this.ensureColumn("auditor_dispatch_id", "TEXT");
     this.ensureColumn("audit_head_sha", "TEXT");
+    this.ensureColumn("dispatch_attempt", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureColumn("dispatch_probe_pending", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private ensureColumn(name: string, sqlType: string): void {
@@ -181,6 +183,8 @@ export class Ledger {
               implementer_terminal_handle = NULL,
               implementer_task_id = NULL,
               implementer_dispatch_id = NULL,
+              dispatch_attempt = 0,
+              dispatch_probe_pending = 0,
               controller_terminal_handle = NULL,
               audit_round = 0,
               audit_result_json = NULL,
@@ -261,6 +265,8 @@ export class Ledger {
         | "auditor_terminal_handle"
         | "auditor_task_id"
         | "auditor_dispatch_id"
+        | "dispatch_attempt"
+        | "dispatch_probe_pending"
         | "controller_terminal_handle"
         | "audit_round"
         | "audit_result_json"

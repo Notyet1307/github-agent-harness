@@ -107,3 +107,14 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Blocked job | Sleep; hold slot | Do not skip to next issue |
 | Poll interval | `pollIntervalSeconds` (default 120) | Config-driven |
 | launchd | Not yet | Start with foreground watch first |
+
+## 2026-07-22 — dispatch acceptance probe
+
+| Decision | Choice | Why |
+|---|---|---|
+| After `dispatch --inject` | Probe TUI ≤45s for acceptance signals | Catch silent idle (Pi/Codex “没反应”) |
+| Strong signals | exact task id / fresh worker preamble or Working / non-idle | Avoid stale terminal history false positives |
+| Confirmed silent failure | Fail old task, recreate terminal, re-dispatch once | Recover dropped inject without duplicate active tasks |
+| Provider/model startup failure | Treat like confirmed silent failure | Infrastructure failure is retryable, not a code failure |
+| Interactive or unknown probe | Preserve provenance; do not auto retry | Avoid duplicate work while human action or probe recovery may unblock it |
+| Max attempts | 2 | Avoid infinite loops |
