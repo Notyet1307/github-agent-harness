@@ -87,8 +87,16 @@ function auditOnceLocked(
     return {
       ok: true,
       jobId: job.id,
-      message: "already audit_passed (M3 complete; no PR yet)",
+      message: "already audit_passed; use harness publish-once for M4",
       details: { head_sha: job.head_sha, audit_round: job.audit_round },
+    };
+  }
+  if (job.state === "publishing" || job.state === "awaiting_merge" || job.state === "merged") {
+    return {
+      ok: true,
+      jobId: job.id,
+      message: `job already past audit (state=${job.state})`,
+      details: { pr_url: job.pr_url },
     };
   }
 

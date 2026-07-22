@@ -74,3 +74,13 @@ When implementing later:
 4. Prefer different models/providers for implementer vs auditor when both are Pi.
 
 Do **not** hardcode Codex/Pi in transition logic.
+
+## 2026-07-22 — M4 publish
+
+| Decision | Choice | Why |
+|---|---|---|
+| Publisher | Controller only (`publish-once`) | Agents never create PRs |
+| Merge | Wait only, no auto-merge | Human / branch protection |
+| CI / changes requested while waiting | Record `last_error`, stay `awaiting_merge` | V1 does not auto-rework from wait loop |
+| After merge | State `merged`, Orca card `completed`, keep worktree | Inspect before delete |
+| Next claim | Only when job is `merged` or `cancelled` | Single-slot rule |

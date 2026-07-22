@@ -4,6 +4,8 @@ import { formatDoctorReport, runDoctor } from "./doctor.js";
 import { pickAll } from "./picker.js";
 import { runOnce } from "./run-once.js";
 import { auditOnce } from "./audit-once.js";
+import { publishOnce } from "./publisher.js";
+import { waitMerge } from "./merge-monitor.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { defaultLedgerPath } from "./config.js";
@@ -16,15 +18,17 @@ Usage:
   harness pick --dry-run [--config path] [--repo OWNER/REPO]
   harness run-once [--config path] [--repo OWNER/REPO] [--issue N]
   harness audit-once [--config path] [--no-rework]
+  harness publish-once [--config path]
+  harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness status [--config path]
   harness help
 
 Pipeline (V1):
-  Picker → Ledger claim → Orca worktree → Implementer profile
-  → Auditor profile (Pi dual-axis) → Gate → (M4) PR → wait merge
+  Picker → Claim → Worktree → Implement → Audit → Publish PR → Wait merge
 
-M2 run-once stops after implement commits.
-M3 audit-once runs Pi dual-axis gate (+ optional rework loop); no PR.
+M2 run-once: implement only
+M3 audit-once: Pi dual-axis gate (+ rework)
+M4 publish-once / wait-merge: push+PR, poll until merged (no auto-merge)
 `;
 }
 
@@ -151,6 +155,39 @@ function main(argv: string[]): number {
     if (result.details) {
       process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
     }
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "publish-once") {
+    const result = publishOnce({ configPath });
+    process.stdout.write(`\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`);
+    if (result.jobId) process.stdout.write(`job: ${result.jobId}\n`);
+    if (result.details) {
+      process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
+    }
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "wait-merge") {
+    const timeoutRaw = readFlag(args, "--timeout-minutes");
+    const pollRaw = readFlag(args, "--poll-seconds");
+    const timeoutMinutes = timeoutRaw != null ? Number(timeoutRaw) : 60;
+    const pollSeconds = pollRaw != null ? Number(pollRaw) : 30;
+    if (!Number.isFinite(timeoutMinutes) || !Number.isFinite(pollSeconds)) {
+      process.stderr.write("invalid --timeout-minutes or --poll-seconds\n");
+      return 2;
+    }
+    const result = waitMerge({
+      configPath,
+      timeoutMinutes,
+      pollSeconds,
+    });
+    process.stdout.write(`\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`);
+    if (result.jobId) process.stdout.write(`job: ${result.jobId}\n`);
+    if (result.details) {
+      process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
+    }
+    // still awaiting after timeout is ok (exit 0); blocked is fail
     return result.ok ? 0 : 1;
   }
 

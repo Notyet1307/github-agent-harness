@@ -15,7 +15,8 @@ Picker → Ledger Claim → Orca Worktree → Codex $implement
 | M1 | `pnpm harness pick --dry-run` | implemented |
 | M2 | `pnpm harness run-once` | implemented (stop after implement commits) |
 | M3 | `pnpm harness audit-once` | implemented (Pi dual-axis gate + rework; no PR) |
-| M4+ | PR / merge wait | not yet |
+| M4 | `pnpm harness publish-once` / `wait-merge` | implemented (push+PR; no auto-merge) |
+| M5+ | crash recovery stress / watch | not yet |
 
 ## Setup
 
@@ -26,6 +27,8 @@ pnpm harness doctor
 pnpm harness pick --dry-run
 pnpm harness run-once          # claim + Orca worktree + implementer; no push/PR
 pnpm harness audit-once        # Pi dual-axis audit gate (+ rework loop); no PR
+pnpm harness publish-once      # push + create PR; stop at awaiting_merge
+pnpm harness wait-merge --timeout-minutes 60
 pnpm harness status
 ```
 

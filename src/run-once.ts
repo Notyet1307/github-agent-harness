@@ -103,7 +103,16 @@ function runOnceLocked(
     if (
       job.state === "awaiting_audit" ||
       job.state === "auditing" ||
-      job.state === "reworking" ||
+      job.state === "reworking"
+    ) {
+      return {
+        ok: true,
+        jobId: job.id,
+        message: `job past implement (state=${job.state}); use harness audit-once`,
+        details: { state: job.state, head_sha: job.head_sha },
+      };
+    }
+    if (
       job.state === "audit_passed" ||
       job.state === "publishing" ||
       job.state === "awaiting_merge"
@@ -111,8 +120,8 @@ function runOnceLocked(
       return {
         ok: true,
         jobId: job.id,
-        message: `job already past implement phase (state=${job.state}); use harness audit-once for M3`,
-        details: { state: job.state, head_sha: job.head_sha },
+        message: `job past audit (state=${job.state}); use harness publish-once / wait-merge`,
+        details: { state: job.state, head_sha: job.head_sha, pr_url: job.pr_url },
       };
     }
     if (job.state === "blocked") {
