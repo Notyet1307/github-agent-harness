@@ -7,6 +7,7 @@ import { auditOnce } from "./audit-once.js";
 import { publishOnce } from "./publisher.js";
 import { waitMerge } from "./merge-monitor.js";
 import { recover } from "./recover.js";
+import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { defaultLedgerPath } from "./config.js";
@@ -22,16 +23,15 @@ Usage:
   harness publish-once [--config path]
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness recover [--config path] [--dry-run] [--execute]
+  harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness status [--config path]
   harness help
 
 Pipeline (V1):
   Picker → Claim → Worktree → Implement → Audit → Publish PR → Wait merge
 
-M2 run-once: implement only
-M3 audit-once: Pi dual-axis gate (+ rework)
-M4 publish-once / wait-merge: push+PR, poll until merged (no auto-merge)
-M5 recover: reconcile after crash; --dry-run default, --execute to resume
+M2–M5: one-shot commands
+M6 watch: poll loop — resume active job, or claim next; never auto-merge
 `;
 }
 
@@ -217,6 +217,32 @@ function main(argv: string[]): number {
         "\nRe-run with --execute to resume the ensure* step.\n",
       );
     }
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "watch") {
+    const maxRaw = readFlag(args, "--max-cycles");
+    const pollRaw = readFlag(args, "--poll-seconds");
+    const maxCycles = maxRaw != null ? Number(maxRaw) : 0;
+    const pollSeconds = pollRaw != null ? Number(pollRaw) : undefined;
+    if (maxRaw != null && !Number.isFinite(maxCycles)) {
+      process.stderr.write("invalid --max-cycles\n");
+      return 2;
+    }
+    if (pollRaw != null && !Number.isFinite(Number(pollRaw))) {
+      process.stderr.write("invalid --poll-seconds\n");
+      return 2;
+    }
+    const result = watch({
+      configPath,
+      once: args.includes("--once"),
+      dryRun: args.includes("--dry-run"),
+      maxCycles,
+      pollSeconds,
+    });
+    process.stdout.write(
+      `\n${result.ok ? "OK" : "FAIL"}: ${result.message} (cycles=${result.cycles})\n`,
+    );
     return result.ok ? 0 : 1;
   }
 

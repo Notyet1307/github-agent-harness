@@ -17,7 +17,7 @@ Picker → Ledger Claim → Orca Worktree → Codex $implement
 | M3 | `pnpm harness audit-once` | implemented (Pi dual-axis gate + rework; no PR) |
 | M4 | `pnpm harness publish-once` / `wait-merge` | implemented (push+PR; no auto-merge) |
 | M5 | `pnpm harness recover` | implemented (reconcile + ensure* resume) |
-| M6 | `harness watch` | not yet |
+| M6 | `pnpm harness watch` | implemented (poll loop; no auto-merge) |
 
 ## Setup
 
@@ -32,9 +32,28 @@ pnpm harness publish-once      # push + create PR; stop at awaiting_merge
 pnpm harness wait-merge --timeout-minutes 60
 pnpm harness recover --dry-run    # M5: what to resume after crash
 pnpm harness recover --execute    # M5: run the ensure* step
+pnpm harness watch --dry-run --once   # M6: one poll cycle, no side effects
+pnpm harness watch                # M6: continuous (Ctrl+C to stop)
 pnpm harness status
-pnpm test                         # unit tests incl. recovery routing
+pnpm test
 ```
+
+### Watch (M6)
+
+```bash
+pnpm harness watch                 # poll forever (config pollIntervalSeconds)
+pnpm harness watch --once          # single cycle
+pnpm harness watch --dry-run --once
+pnpm harness watch --max-cycles 10 --poll-seconds 30
+```
+
+Each cycle:
+
+1. Reconcile active job (same as recover)
+2. If active → resume one ensure* step (`run-once` / `audit-once` / `publish-once` / `wait-merge` poll)
+3. If none → `run-once` to claim next ready issue (if any)
+4. If **blocked** → sleep; **does not** claim next
+5. Never auto-merges — you merge on GitHub; watch records `mergedAt`
 
 ### Crash recovery (M5)
 

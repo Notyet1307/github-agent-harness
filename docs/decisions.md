@@ -96,3 +96,14 @@ Do **not** hardcode Codex/Pi in transition logic.
 | PR create | Always find-by-head before create | No duplicate PR |
 | Worktree | Reuse by issue linkage / path | No duplicate worktree |
 | Tests | Unit matrix + ledger single-slot | Cheap regression without full agent |
+
+## 2026-07-22 — M6 watch
+
+| Decision | Choice | Why |
+|---|---|---|
+| Default loop | `harness watch` | Avoid manual wait-merge / recover |
+| One ensure* step per cycle | Yes (except implement→audit chain) | Simpler failure isolation |
+| Auto-merge | Never | Human / branch protection |
+| Blocked job | Sleep; hold slot | Do not skip to next issue |
+| Poll interval | `pollIntervalSeconds` (default 120) | Config-driven |
+| launchd | Not yet | Start with foreground watch first |
