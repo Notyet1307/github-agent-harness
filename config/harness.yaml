@@ -1,0 +1,58 @@
+version: 1
+
+issueLabel: ready-for-agent
+
+pollIntervalSeconds: 120
+maxConcurrentTotal: 1
+maxAuditRounds: 3
+implementTimeoutMinutes: 45
+
+mergePolicy:
+  mode: wait
+  autoMerge: false
+
+orca:
+  cliPath: orca
+  cliPathFallback: /Applications/Orca.app/Contents/Resources/bin/orca
+  controllerWorktreePath: /Users/yang/github-agent-harness
+  controllerTitle: harness-controller
+
+# Role → profile id. Swap implementer to a Pi profile later without code changes.
+activeProfiles:
+  implementer: codex-default
+  auditor: pi-reviewer
+
+agentProfiles:
+  codex-default:
+    id: codex-default
+    role: implementer
+    runtime: orca
+    orcaAgent: codex
+    invokeHint: "Explicitly invoke the $implement skill."
+
+  # Reserved for M3+. Different Pi profiles can set env.PI_CONFIG_DIR etc.
+  pi-reviewer:
+    id: pi-reviewer
+    role: auditor
+    runtime: orca
+    orcaAgent: pi
+    readonly: true
+    invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA."
+
+  # Example future implementer (not active):
+  # pi-implementer-a:
+  #   id: pi-implementer-a
+  #   role: implementer
+  #   runtime: orca
+  #   orcaAgent: pi
+  #   command: "pi"
+  #   env:
+  #     PI_CONFIG_DIR: /Users/yang/.pi/profiles/implementer-a
+  #   invokeHint: "Explicitly run the implement skill for this issue."
+
+repositories:
+  - github: Notyet1307/harness-sandbox
+    localPath: /Users/yang/harness-sandbox
+    orcaRepoId: 8111723c-f78d-419c-b2c4-0150f4374451
+    baseRef: origin/main
+    defaultBranch: main
