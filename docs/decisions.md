@@ -47,3 +47,30 @@ Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profi
 | Gate input | `.harness/audit-result.json` schema | Natural-language worker_done is not machine-safe |
 | Smells | Non-blocking alone | Matches Matt dual-axis semantics |
 | M3 stop state | `audit_passed` | No PR until M4 |
+
+## Deferred — multiple Pi profiles by role
+
+**Status:** not building now; keep the seam open.
+
+Intent:
+
+- Implementer and auditor may both be Pi, but **different profiles**:
+  - different providers / models
+  - different `PI_CONFIG_DIR` or extension sets
+  - different invoke skills
+- Possibly more than two roles later (e.g. rework-only, docs-only).
+
+Already supported by design (do not collapse later):
+
+- `agentProfiles` + `activeProfiles.implementer|auditor` in `config/harness.yaml`
+- `AgentProfile.command` / `env` fields on the type
+- Roles in the state machine (`implementing` / `auditing` / `reworking`), not brand names
+
+When implementing later:
+
+1. Add concrete profiles (e.g. `pi-implementer-a`, `pi-auditor-b`) with isolated env/config dirs.
+2. Point `activeProfiles` at them; no state-machine rewrite.
+3. Keep **one writer per worktree**; auditor stays readonly + tracked-clean check.
+4. Prefer different models/providers for implementer vs auditor when both are Pi.
+
+Do **not** hardcode Codex/Pi in transition logic.
