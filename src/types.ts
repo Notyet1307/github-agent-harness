@@ -66,9 +66,20 @@ export type IssueCandidate = {
   title: string;
   url: string;
   updatedAt: string;
-  blockedBy: Array<{ number: number; title?: string }>;
+  /** Dependency blockers; may include closed issues from GitHub JSON. */
+  blockedBy: Array<{ number: number; title?: string; state?: string }>;
   labels: string[];
 };
+
+/** True only if blocked by at least one still-OPEN issue. */
+export function hasOpenBlockers(
+  blockedBy: Array<{ number: number; state?: string }>,
+): boolean {
+  return blockedBy.some((b) => {
+    const s = (b.state ?? "OPEN").toUpperCase();
+    return s === "OPEN";
+  });
+}
 
 export type PickSkipReason =
   | "no-ready-label"

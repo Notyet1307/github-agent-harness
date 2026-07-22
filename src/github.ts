@@ -28,8 +28,11 @@ type GhIssueJson = {
   state?: string;
   labels?: Array<string | { name: string }>;
   blockedBy?:
-    | Array<{ number: number; title?: string }>
-    | { nodes?: Array<{ number: number; title?: string }>; totalCount?: number };
+    | Array<{ number: number; title?: string; state?: string }>
+    | {
+        nodes?: Array<{ number: number; title?: string; state?: string }>;
+        totalCount?: number;
+      };
 };
 
 export function ghAuthOk(): { ok: boolean; detail: string } {
@@ -141,7 +144,7 @@ function normalizeIssue(raw: GhIssueJson): IssueCandidate {
 
 function normalizeBlockedBy(
   blockedBy: GhIssueJson["blockedBy"],
-): Array<{ number: number; title?: string }> {
+): Array<{ number: number; title?: string; state?: string }> {
   if (!blockedBy) return [];
   if (Array.isArray(blockedBy)) return blockedBy;
   return blockedBy.nodes ?? [];
@@ -164,10 +167,13 @@ export function issueStillClaimable(
   if (!issue.labels.includes(issueLabel)) {
     return { ok: false, error: `missing label ${issueLabel}` };
   }
-  if (issue.blockedBy.length > 0) {
+  const openBlockers = issue.blockedBy.filter(
+    (b) => (b.state ?? "OPEN").toUpperCase() === "OPEN",
+  );
+  if (openBlockers.length > 0) {
     return {
       ok: false,
-      error: `blocked by ${issue.blockedBy.map((b) => `#${b.number}`).join(",")}`,
+      error: `blocked by ${openBlockers.map((b) => `#${b.number}`).join(",")}`,
     };
   }
   return { ok: true };

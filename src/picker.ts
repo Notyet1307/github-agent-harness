@@ -6,6 +6,7 @@ import type {
   PickSkip,
   RepoConfig,
 } from "./types.js";
+import { hasOpenBlockers } from "./types.js";
 
 /**
  * Dry-run / real pick logic without writing ledger.
@@ -50,8 +51,11 @@ export function pickForRepo(
       });
       continue;
     }
-    if (issue.blockedBy.length > 0) {
-      const blockers = issue.blockedBy.map((b) => `#${b.number}`).join(", ");
+    if (hasOpenBlockers(issue.blockedBy)) {
+      const blockers = issue.blockedBy
+        .filter((b) => (b.state ?? "OPEN").toUpperCase() === "OPEN")
+        .map((b) => `#${b.number}`)
+        .join(", ");
       skipped.push({
         number: issue.number,
         title: issue.title,
@@ -118,7 +122,7 @@ export function pickForRepo(
     });
     return { repo, selected: null, skipped, eligible: eligible.slice(1) };
   }
-  if (issue.blockedBy.length > 0) {
+  if (hasOpenBlockers(issue.blockedBy)) {
     skipped.push({
       number: issue.number,
       title: issue.title,
