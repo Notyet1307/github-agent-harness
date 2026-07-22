@@ -16,7 +16,8 @@ Picker → Ledger Claim → Orca Worktree → Codex $implement
 | M2 | `pnpm harness run-once` | implemented (stop after implement commits) |
 | M3 | `pnpm harness audit-once` | implemented (Pi dual-axis gate + rework; no PR) |
 | M4 | `pnpm harness publish-once` / `wait-merge` | implemented (push+PR; no auto-merge) |
-| M5+ | crash recovery stress / watch | not yet |
+| M5 | `pnpm harness recover` | implemented (reconcile + ensure* resume) |
+| M6 | `harness watch` | not yet |
 
 ## Setup
 
@@ -29,8 +30,32 @@ pnpm harness run-once          # claim + Orca worktree + implementer; no push/PR
 pnpm harness audit-once        # Pi dual-axis audit gate (+ rework loop); no PR
 pnpm harness publish-once      # push + create PR; stop at awaiting_merge
 pnpm harness wait-merge --timeout-minutes 60
+pnpm harness recover --dry-run    # M5: what to resume after crash
+pnpm harness recover --execute    # M5: run the ensure* step
 pnpm harness status
+pnpm test                         # unit tests incl. recovery routing
 ```
+
+### Crash recovery (M5)
+
+After controller crash, **do not claim a new issue**. Run:
+
+```bash
+pnpm harness recover --dry-run
+pnpm harness recover --execute
+```
+
+Routing (ensure*, not blind create):
+
+| State | Resume |
+|---|---|
+| claimed / worktree_ready / implementing | `run-once` (reuse worktree; commits skip re-wait) |
+| awaiting_audit / auditing / reworking | `audit-once` (reuse audit JSON if HEAD matches) |
+| audit_passed / publishing | `publish-once` (reuse existing PR) |
+| awaiting_merge | `wait-merge` |
+| merged / no active job | nothing — safe to pick next |
+
+Invariants: no double claim, no double worktree, no double PR, no skip audit, no next issue until merged.
 
 Config: `config/harness.yaml`.
 

@@ -11,7 +11,7 @@
     "dev": "tsx src/cli.ts",
     "harness": "tsx src/cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test test/**/*.test.ts"
+    "test": "node --import tsx --test 'test/**/*.test.ts'"
   },
   "engines": {
     "node": ">=20"

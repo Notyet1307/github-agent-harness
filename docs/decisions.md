@@ -84,3 +84,15 @@ Do **not** hardcode Codex/Pi in transition logic.
 | CI / changes requested while waiting | Record `last_error`, stay `awaiting_merge` | V1 does not auto-rework from wait loop |
 | After merge | State `merged`, Orca card `completed`, keep worktree | Inspect before delete |
 | Next claim | Only when job is `merged` or `cancelled` | Single-slot rule |
+
+## 2026-07-22 — M5 recovery
+
+| Decision | Choice | Why |
+|---|---|---|
+| Entry command | `harness recover` dry-run default, `--execute` to act | Safe after crash |
+| Routing | Pure `reconcileJob` → ensure* command | Testable without Orca |
+| Codex done / ledger stale | Commits since base ⇒ finalize without worker_done | Crash after implement |
+| Pi done / ledger stale | Reuse `.harness/audit-result.json` if HEAD matches | Crash after audit write |
+| PR create | Always find-by-head before create | No duplicate PR |
+| Worktree | Reuse by issue linkage / path | No duplicate worktree |
+| Tests | Unit matrix + ledger single-slot | Cheap regression without full agent |

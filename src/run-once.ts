@@ -392,39 +392,79 @@ function runOnceLocked(
     }
   }
 
-  // 6) Wait worker_done
+  // 6) Wait worker_done — unless crash-recovery already sees commits (M5)
   if (job.state === "implementing") {
-    const timeoutMs = config.implementTimeoutMinutes * 60_000;
-    log(
-      `waiting worker_done up to ${config.implementTimeoutMinutes} minutes…`,
-    );
-    const done = waitWorkerDone(orcaCli, {
-      controllerHandle: job.controller_terminal_handle!,
-      taskId: job.implementer_task_id!,
-      dispatchId: job.implementer_dispatch_id,
-      timeoutMs,
-      onTick: (info) => log(info),
-    });
-
-    if (!done.ok) {
-      job = ledger.updateJob(job.id, {
-        state: "blocked",
-        last_error: done.error,
-      });
-      setWorktreeProgress(
-        orcaCli,
-        job.worktree_id!,
-        `harness: blocked — ${done.error}`,
-        "in-progress",
+    const earlyHead =
+      job.worktree_path && job.base_sha
+        ? revParse(job.worktree_path, "HEAD")
+        : null;
+    const earlyCommits =
+      job.worktree_path && job.base_sha
+        ? commitCountSince(job.worktree_path, job.base_sha)
+        : 0;
+    if (
+      earlyHead &&
+      job.base_sha &&
+      earlyHead !== job.base_sha &&
+      earlyCommits >= 1
+    ) {
+      log(
+        `M5 resume: commits already present (${earlyCommits}); skipping worker_done wait`,
       );
-      return {
-        ok: false,
-        jobId: job.id,
-        message: done.error,
-        details: { message: done.message },
-      };
+    } else {
+      const timeoutMs = config.implementTimeoutMinutes * 60_000;
+      log(
+        `waiting worker_done up to ${config.implementTimeoutMinutes} minutes…`,
+      );
+      const done = waitWorkerDone(orcaCli, {
+        controllerHandle: job.controller_terminal_handle!,
+        taskId: job.implementer_task_id!,
+        dispatchId: job.implementer_dispatch_id,
+        timeoutMs,
+        onTick: (info) => log(info),
+      });
+
+      if (!done.ok) {
+        // Last-chance recovery: commits may have landed without worker_done
+        const lateHead =
+          job.worktree_path && job.base_sha
+            ? revParse(job.worktree_path, "HEAD")
+            : null;
+        const lateCommits =
+          job.worktree_path && job.base_sha
+            ? commitCountSince(job.worktree_path, job.base_sha)
+            : 0;
+        if (
+          lateHead &&
+          job.base_sha &&
+          lateHead !== job.base_sha &&
+          lateCommits >= 1
+        ) {
+          log(
+            `worker_done missing but commits exist; continuing finalize (M5)`,
+          );
+        } else {
+          job = ledger.updateJob(job.id, {
+            state: "blocked",
+            last_error: done.error,
+          });
+          setWorktreeProgress(
+            orcaCli,
+            job.worktree_id!,
+            `harness: blocked — ${done.error}`,
+            "in-progress",
+          );
+          return {
+            ok: false,
+            jobId: job.id,
+            message: done.error,
+            details: { message: done.message },
+          };
+        }
+      } else {
+        log("received worker_done");
+      }
     }
-    log("received worker_done");
   }
 
   // 7) Verify commits, no push

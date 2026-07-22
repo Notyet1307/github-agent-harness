@@ -6,6 +6,7 @@ import { runOnce } from "./run-once.js";
 import { auditOnce } from "./audit-once.js";
 import { publishOnce } from "./publisher.js";
 import { waitMerge } from "./merge-monitor.js";
+import { recover } from "./recover.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { defaultLedgerPath } from "./config.js";
@@ -20,6 +21,7 @@ Usage:
   harness audit-once [--config path] [--no-rework]
   harness publish-once [--config path]
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
+  harness recover [--config path] [--dry-run] [--execute]
   harness status [--config path]
   harness help
 
@@ -29,6 +31,7 @@ Pipeline (V1):
 M2 run-once: implement only
 M3 audit-once: Pi dual-axis gate (+ rework)
 M4 publish-once / wait-merge: push+PR, poll until merged (no auto-merge)
+M5 recover: reconcile after crash; --dry-run default, --execute to resume
 `;
 }
 
@@ -188,6 +191,32 @@ function main(argv: string[]): number {
       process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
     }
     // still awaiting after timeout is ok (exit 0); blocked is fail
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "recover") {
+    // Default dry-run for safety; --execute resumes the pipeline step.
+    const dryRun = !args.includes("--execute");
+    const result = recover({
+      configPath,
+      dryRun,
+      waitMergeTimeoutMinutes: 0,
+    });
+    process.stdout.write(
+      `\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`,
+    );
+    process.stdout.write(
+      `action: ${result.action.kind}${result.executed ? " (executed)" : " (dry-run)"}\n`,
+    );
+    if (result.jobId) process.stdout.write(`job: ${result.jobId}\n`);
+    if (result.details) {
+      process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
+    }
+    if (dryRun && result.action.kind !== "none" && result.action.kind !== "noop") {
+      process.stdout.write(
+        "\nRe-run with --execute to resume the ensure* step.\n",
+      );
+    }
     return result.ok ? 0 : 1;
   }
 

@@ -274,111 +274,140 @@ function runAuditPhase(
   // Snapshot tracked cleanliness before audit
   const dirtyBefore = trackedDirty(worktreePath);
 
-  // Fresh Pi terminal each round
-  const title = `issue-${job.issue_number}-audit-r${round}`;
-  log(`creating auditor terminal ${title}`);
-  const handle = ensureAgentTerminal(
-    orcaCli,
-    worktreeId,
-    auditor,
-    title,
-    { forceNew: true },
-  );
-  if (!handle) {
+  // M5: if result already written for this HEAD, skip re-dispatch
+  const existing = loadAuditResult(resultPath);
+  const canReuseResult =
+    existing.ok &&
+    existing.result &&
+    (existing.result.head_sha === headSha ||
+      headSha.startsWith(existing.result.head_sha) ||
+      existing.result.head_sha.startsWith(headSha));
+
+  if (!canReuseResult) {
+    // Fresh Pi terminal each round
+    const title = `issue-${job.issue_number}-audit-r${round}`;
+    log(`creating auditor terminal ${title}`);
+    const handle = ensureAgentTerminal(
+      orcaCli,
+      worktreeId,
+      auditor,
+      title,
+      { forceNew: true },
+    );
+    if (!handle) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: "failed to create auditor terminal",
+      });
+      return {
+        ok: false,
+        jobId: job.id,
+        message: "failed to create auditor terminal",
+      };
+    }
+
     job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: "failed to create auditor terminal",
+      state: "auditing",
+      audit_round: round,
+      auditor_profile_id: auditor.id,
+      auditor_terminal_handle: handle,
+      auditor_task_id: null,
+      auditor_dispatch_id: null,
+      audit_head_sha: headSha,
+      head_sha: headSha,
     });
-    return { ok: false, jobId: job.id, message: "failed to create auditor terminal" };
-  }
+    setWorktreeProgress(
+      orcaCli,
+      worktreeId,
+      `harness: auditing r${round} via ${auditor.id}`,
+      "in-review",
+    );
 
-  job = ledger.updateJob(job.id, {
-    state: "auditing",
-    audit_round: round,
-    auditor_profile_id: auditor.id,
-    auditor_terminal_handle: handle,
-    auditor_task_id: null,
-    auditor_dispatch_id: null,
-    audit_head_sha: headSha,
-    head_sha: headSha,
-  });
-  setWorktreeProgress(
-    orcaCli,
-    worktreeId,
-    `harness: auditing r${round} via ${auditor.id}`,
-    "in-review",
-  );
+    const idle = waitTerminalIdle(orcaCli, handle, 120_000);
+    if (!idle.ok) {
+      log(`warn: auditor tui-idle: ${idle.error} (continuing)`);
+    }
 
-  const idle = waitTerminalIdle(orcaCli, handle, 120_000);
-  if (!idle.ok) {
-    log(`warn: auditor tui-idle: ${idle.error} (continuing)`);
-  }
-
-  const spec = renderAuditorSpec({
-    repo: repo.github,
-    issueNumber: job.issue_number,
-    issueUrl: job.issue_url,
-    baseSha,
-    headSha,
-    branch: job.branch ?? currentBranch(worktreePath) ?? "",
-    worktreePath,
-    profileId: auditor.id,
-    orcaAgent: auditor.orcaAgent,
-    invokeHint: auditor.invokeHint,
-    auditRound: round,
-    resultPath: ".harness/audit-result.json",
-  });
-
-  const task = createOrchestrationTask(orcaCli, {
-    title: `Audit ${repo.github}#${job.issue_number} r${round}`,
-    displayName: `issue-${job.issue_number}-audit-r${round}`,
-    spec,
-  });
-  if (!task.ok) {
-    job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: task.error,
+    const spec = renderAuditorSpec({
+      repo: repo.github,
+      issueNumber: job.issue_number,
+      issueUrl: job.issue_url,
+      baseSha,
+      headSha,
+      branch: job.branch ?? currentBranch(worktreePath) ?? "",
+      worktreePath,
+      profileId: auditor.id,
+      orcaAgent: auditor.orcaAgent,
+      invokeHint: auditor.invokeHint,
+      auditRound: round,
+      resultPath: ".harness/audit-result.json",
     });
-    return { ok: false, jobId: job.id, message: task.error };
-  }
 
-  const disp = dispatchTask(orcaCli, {
-    taskId: task.value.taskId,
-    to: handle,
-    from: job.controller_terminal_handle!,
-  });
-  if (!disp.ok) {
+    const task = createOrchestrationTask(orcaCli, {
+      title: `Audit ${repo.github}#${job.issue_number} r${round}`,
+      displayName: `issue-${job.issue_number}-audit-r${round}`,
+      spec,
+    });
+    if (!task.ok) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: task.error,
+      });
+      return { ok: false, jobId: job.id, message: task.error };
+    }
+
+    const disp = dispatchTask(orcaCli, {
+      taskId: task.value.taskId,
+      to: handle,
+      from: job.controller_terminal_handle!,
+    });
+    if (!disp.ok) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: disp.error,
+        auditor_task_id: task.value.taskId,
+      });
+      return { ok: false, jobId: job.id, message: disp.error };
+    }
+
     job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: disp.error,
       auditor_task_id: task.value.taskId,
+      auditor_dispatch_id: disp.value.dispatchId,
     });
-    return { ok: false, jobId: job.id, message: disp.error };
-  }
+    log(
+      `dispatched audit task=${task.value.taskId} dispatch=${disp.value.dispatchId ?? "?"}`,
+    );
 
-  job = ledger.updateJob(job.id, {
-    auditor_task_id: task.value.taskId,
-    auditor_dispatch_id: disp.value.dispatchId,
-  });
-  log(
-    `dispatched audit task=${task.value.taskId} dispatch=${disp.value.dispatchId ?? "?"}`,
-  );
-
-  const done = waitWorkerDone(orcaCli, {
-    controllerHandle: job.controller_terminal_handle!,
-    taskId: task.value.taskId,
-    dispatchId: disp.value.dispatchId,
-    timeoutMs: config.auditTimeoutMinutes * 60_000,
-    onTick: (info) => log(info),
-  });
-  if (!done.ok) {
+    const done = waitWorkerDone(orcaCli, {
+      controllerHandle: job.controller_terminal_handle!,
+      taskId: task.value.taskId,
+      dispatchId: disp.value.dispatchId,
+      timeoutMs: config.auditTimeoutMinutes * 60_000,
+      onTick: (info) => log(info),
+    });
+    if (!done.ok) {
+      // M5: result file may still have been written
+      const late = loadAuditResult(resultPath);
+      if (!(late.ok && late.result)) {
+        job = ledger.updateJob(job.id, {
+          state: "blocked",
+          last_error: done.error,
+        });
+        return { ok: false, jobId: job.id, message: done.error };
+      }
+      log("worker_done missing but audit-result.json present; continuing (M5)");
+    } else {
+      log("received auditor worker_done");
+    }
+  } else {
+    log("M5 resume: reusing existing audit-result.json for current HEAD");
     job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: done.error,
+      state: "auditing",
+      audit_round: round,
+      audit_head_sha: headSha,
+      head_sha: headSha,
     });
-    return { ok: false, jobId: job.id, message: done.error };
   }
-  log("received auditor worker_done");
 
   // Cleanliness: tracked files must not change
   const dirtyAfter = trackedDirty(worktreePath);

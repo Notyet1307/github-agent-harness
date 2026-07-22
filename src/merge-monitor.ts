@@ -54,7 +54,27 @@ function waitMergeLocked(
   const log = (m: string) => process.stdout.write(`[wait-merge] ${m}\n`);
 
   let job = ledger.getActiveJob();
-  if (!job) return { ok: false, message: "no active job" };
+  if (!job) {
+    // Friendly path: user re-runs wait-merge after merge was already recorded.
+    const recent = ledger.listJobs(1)[0];
+    if (recent?.state === "merged") {
+      return {
+        ok: true,
+        jobId: recent.id,
+        message: "no active job; latest job already merged (nothing to do)",
+        details: {
+          pr_url: recent.pr_url,
+          merged_at: recent.merged_at,
+          issue: `${recent.repo}#${recent.issue_number}`,
+        },
+      };
+    }
+    return {
+      ok: false,
+      message:
+        "no active job (nothing in awaiting_merge). Check: pnpm harness status",
+    };
+  }
 
   if (job.state === "merged") {
     return {
