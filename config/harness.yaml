@@ -37,9 +37,9 @@ agentProfiles:
     role: auditor
     runtime: orca
     orcaAgent: pi
-    # Avoid default sol model on baizhi gateway (Codex-version gate errors).
-    # Override anytime without code changes.
-    command: "pi --provider baizhi-responses --model feature/gpt"
+    # Follow ~/.pi/agent/settings.json (provider/model). Pin only if needed, e.g.:
+    # command: "pi --provider baizhi-responses --model feature/gpt-5.6-sol"
+    command: "pi"
     readonly: true
     invokeHint: "Explicitly invoke the matt-code-review-pi skill with the fixed base SHA (project skill under .pi/skills)."
 
