@@ -954,11 +954,10 @@ export function waitWorkerDone(
         };
       }
       if (type.includes("decision_gate") && taskMatches) {
-        return {
-          ok: false,
-          error: "worker raised decision_gate (unsupported in M2 auto path)",
-          message: msg,
-        };
+        input.onTick?.(
+          `worker raised decision_gate for task ${input.taskId}; continuing to wait`,
+        );
+        continue;
       }
       if (type.includes("worker_done") && taskMatches && dispatchMatches) {
         return { ok: true, message: msg };

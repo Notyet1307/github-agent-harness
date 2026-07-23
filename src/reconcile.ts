@@ -51,6 +51,19 @@ export function reconcileJob(
       return { kind: "noop", reason: `terminal state ${job.state}` };
 
     case "blocked":
+      if (
+        job.auditor_task_id &&
+        isRecoverableAuditWaitError(job.last_error) &&
+        hints.auditResultReady === true &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "blocked audit wait completed with a current result; resume gate evaluation",
+        };
+      }
       return {
         kind: "blocked",
         reason: job.last_error ?? "blocked; needs human cancel/resume",
@@ -153,6 +166,14 @@ export function reconcileJob(
         reason: `unknown state ${(job as Job).state}`,
       };
   }
+}
+
+function isRecoverableAuditWaitError(error: string | null): boolean {
+  return Boolean(
+    error &&
+      (error.includes("decision_gate") ||
+        error.startsWith("timeout waiting for worker_done")),
+  );
 }
 
 /** Invariants that recovery must never violate (checked in tests). */

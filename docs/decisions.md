@@ -42,8 +42,9 @@ Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profi
 
 | Decision | Choice | Why |
 |---|---|---|
-| Pi subagent source | User global `npm:pi-sub-agent` | Project copy conflicts with global tool name |
-| Auditor model | `pi --provider baizhi-responses --model feature/gpt` | Default sol hits baizhi “Codex version too low” |
+| Pi subagent source | User global `npm:pi-subagents` (`nicobailon/pi-subagents`) | Supports explicit user-scope discovery and child resource policy |
+| Auditor resources | Controller-owned launcher, skill, and `harness-reviewer` | Project agents/settings cannot redefine the independent reviewer |
+| Auditor model | Inherit the active parent Pi provider/model | Child receives the resolved parent model; pin in the launcher only if a gateway requires it |
 | Gate input | `.harness/audit-result.json` schema | Natural-language worker_done is not machine-safe |
 | Smells | Non-blocking alone | Matches Matt dual-axis semantics |
 | M3 stop state | `audit_passed` | No PR until M4 |
@@ -56,7 +57,7 @@ Intent:
 
 - Implementer and auditor may both be Pi, but **different profiles**:
   - different providers / models
-  - different `PI_CONFIG_DIR` or extension sets
+  - different `PI_CODING_AGENT_DIR` or extension sets
   - different invoke skills
 - Possibly more than two roles later (e.g. rework-only, docs-only).
 
@@ -93,6 +94,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Routing | Pure `reconcileJob` → ensure* command | Testable without Orca |
 | Codex done / ledger stale | Commits since base ⇒ finalize without worker_done | Crash after implement |
 | Pi done / ledger stale | Reuse `.harness/audit-result.json` if HEAD matches | Crash after audit write |
+| Blocked audit wait | Known decision/timeout error + auditor task completed + current result + tracked clean ⇒ re-enter audit gate | Recover late evidence without accepting it directly |
 | PR create | Always find-by-head before create | No duplicate PR |
 | Worktree | Reuse by issue linkage / path | No duplicate worktree |
 | Tests | Unit matrix + ledger single-slot | Cheap regression without full agent |
@@ -104,7 +106,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Default loop | `harness watch` | Avoid manual wait-merge / recover |
 | One ensure* step per cycle | Yes (except implement→audit chain) | Simpler failure isolation |
 | Auto-merge | Never | Human / branch protection |
-| Blocked job | Sleep; hold slot | Do not skip to next issue |
+| Blocked job | Sleep; hold slot, except the evidence-complete audit-wait recovery above | Do not skip to next issue |
 | Poll interval | `pollIntervalSeconds` (default 120) | Config-driven |
 | launchd | Not yet | Start with foreground watch first |
 

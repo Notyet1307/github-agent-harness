@@ -76,6 +76,12 @@ export function recover(options: {
     if (action.kind === "blocked") {
       return { ...base, ok: false, message: action.reason };
     }
+    if (job?.state === "blocked" && action.kind === "audit_once") {
+      ledger.updateJob(job.id, {
+        state: "auditing",
+        last_error: null,
+      });
+    }
 
     // Execute without holding outer lock across long agent runs:
     // release before *Once which re-acquires.
@@ -84,6 +90,8 @@ export function recover(options: {
 
     return executeAction(action, {
       configPath: options.configPath,
+      ledgerPath: options.ledgerPath,
+      lockPath: options.lockPath,
       waitMergeTimeoutMinutes: options.waitMergeTimeoutMinutes ?? 0,
       jobId: job?.id,
       hints,
@@ -102,6 +110,8 @@ function executeAction(
   action: RecoverAction,
   opts: {
     configPath?: string;
+    ledgerPath?: string;
+    lockPath?: string;
     waitMergeTimeoutMinutes: number;
     jobId?: string;
     hints: ReconcileHints;
@@ -109,7 +119,11 @@ function executeAction(
 ): RecoverResult {
   switch (action.kind) {
     case "run_once": {
-      const r = runOnce({ configPath: opts.configPath });
+      const r = runOnce({
+        configPath: opts.configPath,
+        ledgerPath: opts.ledgerPath,
+        lockPath: opts.lockPath,
+      });
       return {
         ok: r.ok,
         message: `recover→run-once: ${r.message}`,
@@ -120,7 +134,12 @@ function executeAction(
       };
     }
     case "audit_once": {
-      const r = auditOnce({ configPath: opts.configPath, withRework: true });
+      const r = auditOnce({
+        configPath: opts.configPath,
+        ledgerPath: opts.ledgerPath,
+        lockPath: opts.lockPath,
+        withRework: true,
+      });
       return {
         ok: r.ok,
         message: `recover→audit-once: ${r.message}`,
@@ -131,7 +150,11 @@ function executeAction(
       };
     }
     case "publish_once": {
-      const r = publishOnce({ configPath: opts.configPath });
+      const r = publishOnce({
+        configPath: opts.configPath,
+        ledgerPath: opts.ledgerPath,
+        lockPath: opts.lockPath,
+      });
       return {
         ok: r.ok,
         message: `recover→publish-once: ${r.message}`,
@@ -144,6 +167,8 @@ function executeAction(
     case "wait_merge": {
       const r = waitMerge({
         configPath: opts.configPath,
+        ledgerPath: opts.ledgerPath,
+        lockPath: opts.lockPath,
         timeoutMinutes: opts.waitMergeTimeoutMinutes,
       });
       return {

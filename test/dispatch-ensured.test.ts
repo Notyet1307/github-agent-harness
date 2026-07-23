@@ -3,7 +3,31 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dispatchTaskEnsured } from "../src/orca-runtime.js";
+import {
+  dispatchTaskEnsured,
+  waitWorkerDone,
+} from "../src/orca-runtime.js";
+
+test("keeps waiting after decision_gate until the same task sends worker_done", () => {
+  const fake = makeFakeOrca("decision-then-done");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    timeoutMs: 3_000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    fake
+      .calls()
+      .filter(
+        (args) =>
+          args[0] === "orchestration" && args[1] === "check",
+      ).length,
+    2,
+  );
+});
 
 test("requires tui-idle before creating an orchestration task", () => {
   const fake = makeFakeOrca("not-idle");
@@ -200,7 +224,8 @@ function makeFakeOrca(
     | "silent-idle"
     | "silent-then-working"
     | "task-update-fails"
-    | "existing-task",
+    | "existing-task"
+    | "decision-then-done",
 ): {
   command: string;
   calls: () => string[][];
@@ -209,7 +234,10 @@ function makeFakeOrca(
   const command = join(dir, "orca.cjs");
   const callsPath = join(dir, "calls.jsonl");
   writeFileSync(join(dir, "mode"), mode);
-  writeFileSync(join(dir, "state.json"), JSON.stringify({ waits: 0, tasks: 0 }));
+  writeFileSync(
+    join(dir, "state.json"),
+    JSON.stringify({ waits: 0, tasks: 0, checks: 0 }),
+  );
   writeFileSync(
     command,
     `#!/usr/bin/env node
@@ -285,6 +313,14 @@ if (key === "terminal wait") {
   } else {
     console.log(JSON.stringify({ ok: true, result: {} }));
   }
+} else if (key === "orchestration check" && mode === "decision-then-done") {
+  state.checks += 1;
+  writeFileSync(statePath, JSON.stringify(state));
+  console.log(JSON.stringify({ ok: true, result: { messages: [{
+    type: state.checks === 1 ? "decision_gate" : "worker_done",
+    taskId: "task-1",
+    dispatchId: "dispatch-1"
+  }] } }));
 } else {
   console.log(JSON.stringify({ ok: false, error: { message: "unexpected " + key } }));
   process.exitCode = 1;

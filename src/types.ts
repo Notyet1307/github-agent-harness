@@ -27,7 +27,7 @@ export type AgentProfile = {
   orcaAgent: string;
   /** Optional full command override for terminal create (e.g. custom pi argv). */
   command?: string;
-  /** Env vars for this profile (e.g. PI_CONFIG_DIR for provider isolation). */
+  /** Env vars reserved for future launch plumbing (e.g. PI_CODING_AGENT_DIR). */
   env?: Record<string, string>;
   /** Hint forced into the task spec so skills with disable-model-invocation still run. */
   invokeHint: string;

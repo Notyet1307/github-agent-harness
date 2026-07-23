@@ -52,7 +52,7 @@ Each cycle:
 1. Reconcile active job (same as recover)
 2. If active → resume one ensure* step (`run-once` / `audit-once` / `publish-once` / `wait-merge` poll)
 3. If none → `run-once` to claim next ready issue (if any)
-4. If **blocked** → sleep; **does not** claim next
+4. If **blocked** → sleep and hold the slot; only a completed audit wait with a known decision/timeout error, current result, and clean tracked tree resumes through the audit gate
 5. Never auto-merges — you merge on GitHub; watch records `mergedAt`
 
 ### Crash recovery (M5)
@@ -72,7 +72,11 @@ Routing (ensure*, not blind create):
 | awaiting_audit / auditing / reworking | `audit-once` (reuse audit JSON if HEAD matches) |
 | audit_passed / publishing | `publish-once` (reuse existing PR) |
 | awaiting_merge | `wait-merge` |
+| blocked after eligible audit wait | `audit-once` (evaluate the existing result through the normal gate) |
+| other blocked | nothing — hold the slot |
 | merged / no active job | nothing — safe to pick next |
+
+Recovery never accepts an audit result directly; eligible interrupted audits re-enter `audit-once` so the normal SHA, cleanliness, validation, and finding gates still run.
 
 Invariants: no double claim, no double worktree, no double PR, no skip audit, no next issue until merged.
 
