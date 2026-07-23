@@ -533,6 +533,8 @@ export function dispatchTaskEnsured(
       to: string;
       attempt: 1 | 2;
     };
+    /** Final caller-owned guard immediately before each task creation. */
+    beforeTaskCreate?: (attempt: 1 | 2) => string | null;
     /** Called before second attempt; return replacement agent handle or null. */
     recreateAgentTerminal?: () => string | null;
   },
@@ -657,6 +659,15 @@ export function dispatchTaskEnsured(
       }
     | DispatchAttemptFailure => {
     const cursor = terminalCursor(orcaCli, to);
+    const guardError = input.beforeTaskCreate?.(attempt) ?? null;
+    if (guardError) {
+      return {
+        ok: false,
+        error: guardError,
+        kind: "unknown",
+        attempt,
+      };
+    }
     const task = createOrchestrationTask(orcaCli, {
       title:
         attempt === 1 ? input.title : `${input.title} (redispatch)`,

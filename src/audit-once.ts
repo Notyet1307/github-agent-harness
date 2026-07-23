@@ -15,8 +15,8 @@ import {
   type GateDecision,
 } from "./audit-gate.js";
 import {
-  commitCountSince,
   currentBranch,
+  git,
   logOnelineSince,
   revParse,
 } from "./git.js";
@@ -659,6 +659,35 @@ function runReworkPhase(
   const worktreeId = job.worktree_id;
   const worktreePath = job.worktree_path;
   const baseSha = job.base_sha;
+  const blockRework = (error: string): AuditOnceResult => {
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+    });
+    return { ok: false, jobId: job.id, message: error };
+  };
+  const auditHeadSha = job.audit_head_sha;
+  if (!auditHeadSha) {
+    return blockRework("rework missing audited HEAD");
+  }
+  const dispatchFixedPointError = (): string | null => {
+    const reworkStartHead = revParse(worktreePath, "HEAD");
+    if (reworkStartHead !== auditHeadSha) {
+      return (
+        `rework HEAD changed before rework dispatch: expected ${auditHeadSha}, ` +
+        `got ${reworkStartHead ?? "unreadable"}`
+      );
+    }
+    const dirtyBeforeRework = trackedDirty(worktreePath);
+    if (dirtyBeforeRework) {
+      return `tracked files dirty before rework dispatch:\n${dirtyBeforeRework}`;
+    }
+    return null;
+  };
+  if (!job.implementer_task_id) {
+    const fixedPointError = dispatchFixedPointError();
+    if (fixedPointError) return blockRework(fixedPointError);
+  }
 
   // Prefer existing implementer terminal; else create
   let handle = job.implementer_terminal_handle;
@@ -703,6 +732,7 @@ function runReworkPhase(
             attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
           }
         : undefined;
+    let taskCreateGuardError: string | null = null;
     const ensured = dispatchTaskEnsured(orcaCli, {
       title: `Rework ${repo.github}#${job.issue_number} after audit r${job.audit_round}`,
       displayName: `issue-${job.issue_number}-rework-r${job.audit_round}`,
@@ -711,6 +741,10 @@ function runReworkPhase(
       from: job.controller_terminal_handle!,
       onLog: log,
       existingDispatch,
+      beforeTaskCreate: () => {
+        taskCreateGuardError = dispatchFixedPointError();
+        return taskCreateGuardError;
+      },
       onDispatched: (event) => {
         job = ledger.updateJob(jobId, {
           state: "reworking",
@@ -738,11 +772,14 @@ function runReworkPhase(
         ? ensured.lastDispatchId ?? null
         : job.implementer_dispatch_id;
       const shouldBlock =
+        taskCreateGuardError !== null ||
         ensured.kind === "exhausted" ||
         (hasLastTask && dispatchId === null);
       job = ledger.updateJob(job.id, {
         state: shouldBlock ? "blocked" : "reworking",
-        last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
+        last_error:
+          taskCreateGuardError ??
+          `dispatch ${ensured.kind}: ${ensured.error}`,
         implementer_terminal_handle: ensured.to,
         implementer_task_id: taskId,
         implementer_dispatch_id: dispatchId,
@@ -752,7 +789,11 @@ function runReworkPhase(
         dispatch_probe_pending:
           shouldBlock || !taskId ? 0 : 1,
       });
-      return { ok: false, jobId: job.id, message: ensured.error };
+      return {
+        ok: false,
+        jobId: job.id,
+        message: taskCreateGuardError ?? ensured.error,
+      };
     }
 
     job = ledger.updateJob(job.id, {
@@ -793,20 +834,49 @@ function runReworkPhase(
   }
 
   const headSha = revParse(worktreePath, "HEAD");
-  if (!headSha || headSha === baseSha) {
-    job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: "rework finished without new HEAD",
-    });
-    return { ok: false, jobId: job.id, message: "rework produced no commits" };
+  if (!headSha) {
+    return blockRework("cannot read rework HEAD");
   }
-  const commits = commitCountSince(worktreePath, baseSha);
+  if (headSha === auditHeadSha) {
+    return blockRework("rework produced no commits after audited HEAD");
+  }
+  const ancestry = git(worktreePath, [
+    "merge-base",
+    "--is-ancestor",
+    auditHeadSha,
+    headSha,
+  ]);
+  if (!ancestry.ok && ancestry.stderr) {
+    return blockRework(
+      `cannot verify rework ancestry: ${ancestry.stderr}`,
+    );
+  }
+  if (!ancestry.ok) {
+    return blockRework(
+      "rework HEAD is not a descendant of audited HEAD",
+    );
+  }
+  const count = git(worktreePath, [
+    "rev-list",
+    "--count",
+    `${auditHeadSha}..${headSha}`,
+  ]);
+  if (!count.ok) {
+    return blockRework(
+      `cannot count rework commits: ${count.stderr || "unknown Git error"}`,
+    );
+  }
+  const commits = Number(count.stdout);
+  if (!Number.isSafeInteger(commits)) {
+    return blockRework(`invalid rework commit count: ${count.stdout}`);
+  }
   if (commits < 1) {
-    job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: "rework produced zero commits since base",
-    });
-    return { ok: false, jobId: job.id, message: "rework produced zero commits" };
+    return blockRework("rework produced zero commits after audited HEAD");
+  }
+  const dirtyAfterRework = trackedDirty(worktreePath);
+  if (dirtyAfterRework) {
+    const error = `tracked files dirty after rework:\n${dirtyAfterRework}`;
+    return blockRework(error);
   }
 
   job = ledger.updateJob(job.id, {
@@ -820,7 +890,7 @@ function runReworkPhase(
     dispatch_attempt: 0,
     dispatch_probe_pending: 0,
   });
-  log(`rework done head=${headSha.slice(0, 7)} commits_since_base=${commits}`);
+  log(`rework done head=${headSha.slice(0, 7)} commits_since_audit=${commits}`);
   return {
     ok: true,
     jobId: job.id,

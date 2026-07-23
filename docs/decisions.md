@@ -49,6 +49,7 @@ implementer decision; it remains available only as an explicit rollback.
 | Auditor model | Inherit the active parent Pi provider/model | Child receives the resolved parent model; pin in the launcher only if a gateway requires it |
 | Gate input | Runtime-validated `.harness/audit-result.json` with full exact SHAs and validation evidence | Natural-language worker_done and TypeScript casts are not machine-safe |
 | Smells | Non-blocking alone | Matches Matt dual-axis semantics |
+| Rework fixed point | Before a new/retry dispatch require the exact `audit_head_sha` with tracked files clean; accept completion only as a clean tracked descendant commit | Do not treat original implementation commits, dirty tracked changes, or rewritten history as rework |
 | M3 stop state | `audit_passed` | No PR until M4 |
 
 ## 2026-07-23 — Pi implementer
