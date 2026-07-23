@@ -37,6 +37,8 @@ Controller owns business state (SQLite ledger). Orca owns runtime visibility.
 | Auditor | Profile `pi-reviewer` reserved | M3; supports alternate Pi provider dirs later |
 
 Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profiles** under `agentProfiles` + `activeProfiles`.
+The `codex-default` choice above was superseded by the 2026-07-23 Pi
+implementer decision; it remains available only as an explicit rollback.
 
 ## 2026-07-22 — M3 audit
 
@@ -88,7 +90,8 @@ When implementing later:
 
 1. Add concrete profiles (e.g. `pi-implementer-a`, `pi-auditor-b`) with isolated env/config dirs.
 2. Point `activeProfiles` at them; no state-machine rewrite.
-3. Keep **one writer per worktree**; auditor stays readonly + tracked-clean check.
+3. Keep **one tracked-code writer per worktree**; the auditor may write only
+   the gate artifact and must leave tracked files and HEAD unchanged.
 4. Prefer different models/providers for implementer vs auditor when both are Pi.
 
 Do **not** hardcode Codex/Pi in transition logic.
@@ -135,6 +138,18 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Blocked job | Sleep; hold slot, except the evidence-complete audit-wait recovery above | Do not skip to next issue |
 | Poll interval | `pollIntervalSeconds` (default 120) | Config-driven |
 | launchd | Not yet | Start with foreground watch first |
+
+## 2026-07-23 — launchd deployment remains deferred
+
+| Decision | Choice | Why |
+|---|---|---|
+| Current state | Documentation only; the repository ships no plist or lifecycle commands | Do not imply a service exists before its lifecycle is tested |
+| Deployment target | Enable only in the later production repository | This controller remains an actively changing harness |
+| Current operation | Foreground `harness watch` | Existing behavior is implemented and observable |
+| Future service behavior | Run the full active watch loop | A daemon would auto-claim eligible issues as well as record merges; it is not a passive merge monitor |
+| Merge and cleanup | No auto-merge; mark the ledger job `merged`, free the slot, retain the worktree | Preserve current safety and inspection policy |
+| Environment gate | User LaunchAgent with pinned Node/repo/config paths, explicit `HOME`/stable `PATH`, logs, `doctor`, single-instance, and uninstall checks | launchd does not inherit the interactive shell environment |
+| Shutdown gate | Verify or replace the synchronous poll sleep before relying on graceful `bootout` | `SIGTERM` handling can currently wait up to one poll interval while `spawnSync` blocks |
 
 ## 2026-07-22 — dispatch acceptance probe
 
