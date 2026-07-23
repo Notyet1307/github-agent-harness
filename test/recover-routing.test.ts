@@ -1,10 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Ledger } from "../src/ledger.js";
 import { reconcileJob } from "../src/reconcile.js";
+import { recover } from "../src/recover.js";
 
 /**
  * Simulate the M5 stage matrix as ledger states + hints
@@ -158,3 +166,170 @@ test("ledger fixture: active implementing blocks new claim", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("recover executes a completed blocked audit result through the gate", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-recover-audit-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const worktree = join(dir, "worktree");
+  mkdirSync(worktree);
+  git(worktree, "init", "-b", "main");
+  git(worktree, "config", "user.name", "Harness Test");
+  git(worktree, "config", "user.email", "harness@example.test");
+  writeFileSync(join(worktree, "value.txt"), "base\n");
+  git(worktree, "add", "value.txt");
+  git(worktree, "commit", "-m", "base");
+  const baseSha = git(worktree, "rev-parse", "HEAD");
+  writeFileSync(join(worktree, "value.txt"), "head\n");
+  git(worktree, "add", "value.txt");
+  git(worktree, "commit", "-m", "head");
+  const headSha = git(worktree, "rev-parse", "HEAD");
+
+  const resultDir = join(worktree, ".harness");
+  mkdirSync(resultDir);
+  writeFileSync(
+    join(resultDir, "audit-result.json"),
+    JSON.stringify({
+      status: "pass",
+      base_sha: baseSha,
+      head_sha: headSha,
+      standards: {
+        documented_standard_violations: [],
+        smell_judgement_calls: [],
+      },
+      spec: {
+        missing_or_partial: [],
+        incorrect_implementation: [],
+        scope_creep: [],
+      },
+      validation: { commands: [] },
+    }),
+  );
+
+  const fakeOrca = join(dir, "orca.cjs");
+  writeFileSync(
+    fakeOrca,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2).filter((arg) => arg !== "--json");
+const key = args.slice(0, 2).join(" ");
+if (args[0] === "status") {
+  console.log(JSON.stringify({ ok: true, result: {
+    app: { running: true },
+    runtime: { state: "ready", reachable: true }
+  } }));
+} else if (key === "orchestration task-list") {
+  console.log(JSON.stringify({ ok: true, result: {
+    tasks: [{ id: "task-audit", status: "completed" }]
+  } }));
+} else if (key === "terminal list") {
+  console.log(JSON.stringify({ ok: true, result: {
+    terminals: [{
+      handle: "controller-1",
+      title: "test-controller",
+      connected: true
+    }]
+  } }));
+} else if (key === "worktree set") {
+  console.log(JSON.stringify({ ok: true, result: {} }));
+} else {
+  console.log(JSON.stringify({ ok: false, error: {
+    message: "unexpected " + key
+  } }));
+  process.exitCode = 1;
+}
+`,
+  );
+  chmodSync(fakeOrca, 0o755);
+
+  const configPath = join(dir, "harness.yaml");
+  writeFileSync(
+    configPath,
+    `version: 1
+issueLabel: ready-for-agent
+maxAuditRounds: 3
+orca:
+  cliPath: ${JSON.stringify(fakeOrca)}
+  cliPathFallback: ${JSON.stringify(fakeOrca)}
+  controllerWorktreePath: ${JSON.stringify(dir)}
+  controllerTitle: test-controller
+activeProfiles:
+  implementer: codex-default
+  auditor: pi-reviewer
+agentProfiles:
+  codex-default:
+    id: codex-default
+    role: implementer
+    runtime: orca
+    orcaAgent: codex
+    invokeHint: implement
+  pi-reviewer:
+    id: pi-reviewer
+    role: auditor
+    runtime: orca
+    orcaAgent: pi
+    readonly: true
+    invokeHint: audit
+repositories:
+  - github: owner/repo
+    localPath: ${JSON.stringify(worktree)}
+    orcaRepoId: repo-1
+    baseRef: origin/main
+    defaultBranch: main
+`,
+  );
+
+  const ledgerPath = join(dir, "harness.sqlite");
+  const ledger = new Ledger(ledgerPath);
+  const claimed = ledger.tryClaim({
+    id: "job-audit",
+    repo: "owner/repo",
+    issue: {
+      number: 8,
+      title: "Audit recovery",
+      url: "https://example.test/issues/8",
+      updatedAt: "2026-07-23T00:00:00Z",
+      blockedBy: [],
+      labels: ["ready-for-agent"],
+    },
+    baseRef: "origin/main",
+    implementerProfileId: "codex-default",
+  });
+  assert.equal(claimed.ok, true);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    base_sha: baseSha,
+    worktree_id: "worktree-1",
+    worktree_path: worktree,
+    auditor_profile_id: "pi-reviewer",
+    auditor_terminal_handle: "pi-1",
+    auditor_task_id: "task-audit",
+    auditor_dispatch_id: "dispatch-audit",
+    controller_terminal_handle: "controller-1",
+    audit_round: 1,
+    audit_head_sha: headSha,
+    head_sha: headSha,
+    last_error:
+      "worker raised decision_gate (unsupported in M2 auto path)",
+  });
+  ledger.close();
+
+  const result = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  assert.equal(result.action.kind, "audit_once");
+  const verified = new Ledger(ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  verified.close();
+});
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+  }).trim();
+}

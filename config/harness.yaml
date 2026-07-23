@@ -31,17 +31,16 @@ agentProfiles:
     orcaAgent: codex
     invokeHint: "Explicitly invoke the $implement skill."
 
-  # Reserved for M3+. Different Pi profiles can set env.PI_CONFIG_DIR etc.
+  # Dedicated audit profile: controller-owned skill + user-scope reviewer only.
   pi-reviewer:
     id: pi-reviewer
     role: auditor
     runtime: orca
     orcaAgent: pi
-    # Follow ~/.pi/agent/settings.json (provider/model). Pin only if needed, e.g.:
-    # command: "pi --provider baizhi-responses --model feature/gpt-5.6-sol"
-    command: "pi"
+    # The launcher follows the parent Pi provider/model while isolating audit resources.
+    command: "/Users/yang/github-agent-harness/scripts/pi-auditor"
     readonly: true
-    invokeHint: "Explicitly invoke the matt-code-review-pi skill with the fixed base SHA (project skill under .pi/skills)."
+    invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA. Use only the controller-owned harness-reviewer in user scope."
 
   # Example future implementer (not active):
   # pi-implementer-a:
@@ -51,7 +50,7 @@ agentProfiles:
   #   orcaAgent: pi
   #   command: "pi"
   #   env:
-  #     PI_CONFIG_DIR: /Users/yang/.pi/profiles/implementer-a
+  #     PI_CODING_AGENT_DIR: /Users/yang/.pi/profiles/implementer-a
   #   invokeHint: "Explicitly run the implement skill for this issue."
 
 repositories:

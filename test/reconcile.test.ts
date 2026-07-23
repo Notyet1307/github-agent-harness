@@ -98,6 +98,59 @@ test("blocked stays blocked", () => {
   assert.equal(a.kind, "blocked");
 });
 
+test("blocked audit wait resumes when completed evidence is ready", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      last_error:
+        "worker raised decision_gate (unsupported in M2 auto path)",
+    }),
+    {
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      trackedClean: true,
+    },
+  );
+
+  assert.equal(a.kind, "audit_once");
+});
+
+test("timed-out audit wait resumes when completed evidence is ready", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      last_error: "timeout waiting for worker_done on task task-audit",
+    }),
+    {
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      trackedClean: true,
+    },
+  );
+
+  assert.equal(a.kind, "audit_once");
+});
+
+test("blocked audit wait stays blocked when completed evidence is incomplete", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      last_error:
+        "worker raised decision_gate (unsupported in M2 auto path)",
+    }),
+    {
+      auditResultReady: true,
+      auditTaskStatus: "running",
+      trackedClean: true,
+    },
+  );
+
+  assert.equal(a.kind, "blocked");
+});
+
 test("recovery invariants are documented", () => {
   const inv = recoveryInvariants();
   assert.ok(inv.some((s) => s.includes("never claim a second")));

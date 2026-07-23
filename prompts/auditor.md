@@ -21,7 +21,7 @@ You must not implement features. You must not act as the publisher.
    `git diff {{baseSha}}...HEAD`
 3. {{invokeHint}}
    Fixed point argument: `{{baseSha}}`
-4. Run Standards and Spec axes in **isolated parallel subagents** (Pi `subagent` tool, two tasks, `agentScope: project`, `confirmProjectAgents: false`).
+4. Run Standards and Spec axes in **isolated parallel subagents** using only `harness-reviewer` with `agentScope: user` and fresh context. Never use or fall back to a project agent.
 5. Run approved validation where useful (`npm test`, and lint/typecheck/build if defined).
 6. Write the machine-readable audit JSON to `{{resultPath}}` exactly once.
 7. Do **not** modify tracked product source files. Creating `{{resultPath}}` / `.harness/` is allowed.

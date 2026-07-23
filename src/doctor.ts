@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig } from "./config.js";
+import { parse as parseYaml } from "yaml";
+import { HARNESS_ROOT, loadConfig } from "./config.js";
 import { execFile, which } from "./exec.js";
 import { ghAuthOk } from "./github.js";
 import { orcaJson, orcaStatus, resolveOrcaCli } from "./orca.js";
@@ -19,6 +20,72 @@ export type DoctorReport = {
   ok: boolean;
   checks: Check[];
 };
+
+export function findPiAuditorAgentConflicts(
+  piAgentDir: string,
+  homeDir = process.env.HOME ?? "",
+): string[] {
+  return [join(piAgentDir, "agents"), join(homeDir, ".agents")].flatMap(
+    (root) => findNamedAgentFiles(root, root, "harness-reviewer"),
+  );
+}
+
+function findNamedAgentFiles(
+  root: string,
+  dir: string,
+  agentName: string,
+): string[] {
+  if (!existsSync(dir)) return [];
+
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+      a.name.localeCompare(b.name),
+    );
+  } catch {
+    return [];
+  }
+
+  const matches: string[] = [];
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (dir === root && root.endsWith(".agents") && entry.name === "skills") {
+        continue;
+      }
+      matches.push(...findNamedAgentFiles(root, path, agentName));
+      continue;
+    }
+    if (
+      (!entry.isFile() && !entry.isSymbolicLink()) ||
+      !entry.name.endsWith(".md") ||
+      entry.name.endsWith(".chain.md")
+    ) {
+      continue;
+    }
+
+    try {
+      const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(
+        readFileSync(path, "utf8"),
+      )?.[1];
+      const parsed = frontmatter ? parseYaml(frontmatter) : null;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "name" in parsed &&
+        parsed.name === agentName &&
+        "description" in parsed &&
+        Boolean(parsed.description) &&
+        (!("package" in parsed) || !parsed.package)
+      ) {
+        matches.push(path);
+      }
+    } catch {
+      // Pi ignores unreadable or invalid agent definitions too.
+    }
+  }
+  return matches;
+}
 
 export function runDoctor(configPath?: string): DoctorReport {
   const checks: Check[] = [];
@@ -68,28 +135,85 @@ export function runDoctor(configPath?: string): DoctorReport {
     }
   }
 
-  // Matt skills
+  // Implementer skill
   const skillRoot = join(process.env.HOME ?? "", ".agents/skills");
-  for (const skill of ["implement", "code-review"] as const) {
-    const skillPath = join(skillRoot, skill, "SKILL.md");
+  const implementSkillPath = join(skillRoot, "implement", "SKILL.md");
+  checks.push({
+    name: "skill:implement",
+    level: existsSync(implementSkillPath) ? "ok" : "warn",
+    detail: existsSync(implementSkillPath)
+      ? implementSkillPath
+      : `missing ${implementSkillPath} (Codex implement path needs it)`,
+  });
+
+  // Controller-owned Pi audit resources
+  for (const [name, resourcePath] of [
+    ["pi-auditor-launcher", join(HARNESS_ROOT, "scripts/pi-auditor")],
+    [
+      "pi-auditor-skill",
+      join(HARNESS_ROOT, "pi/auditor/skills/matt-code-review-pi/SKILL.md"),
+    ],
+    [
+      "pi-auditor-agent",
+      join(HARNESS_ROOT, "pi/auditor/agents/harness-reviewer.md"),
+    ],
+  ] as const) {
     checks.push({
-      name: `skill:${skill}`,
-      level: existsSync(skillPath) ? "ok" : "warn",
-      detail: existsSync(skillPath)
-        ? skillPath
-        : `missing ${skillPath} (Codex implement path needs it)`,
+      name,
+      level: existsSync(resourcePath) ? "ok" : "fail",
+      detail: existsSync(resourcePath) ? resourcePath : `missing ${resourcePath}`,
     });
   }
 
-  // Pi subagent example (not yet installed into target repos — warn only at M0)
-  const piSubagentExample =
-    "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/examples/extensions/subagent";
+  const piAgentDir =
+    process.env.PI_CODING_AGENT_DIR ??
+    join(process.env.HOME ?? "", ".pi/agent");
+  const piSubagentsPackage = join(
+    piAgentDir,
+    "npm/node_modules/pi-subagents/package.json",
+  );
+  let piSubagentsOk = false;
+  let piSubagentsDetail = `missing ${piSubagentsPackage}`;
+  if (existsSync(piSubagentsPackage)) {
+    try {
+      const pkg = JSON.parse(readFileSync(piSubagentsPackage, "utf8")) as {
+        name?: string;
+        version?: string;
+      };
+      piSubagentsOk = pkg.name === "pi-subagents" && Boolean(pkg.version);
+      piSubagentsDetail = `${pkg.name ?? "pi-subagents"}@${pkg.version ?? "unknown"} (${piSubagentsPackage})`;
+    } catch (err) {
+      piSubagentsDetail = `invalid ${piSubagentsPackage}: ${(err as Error).message}`;
+    }
+  }
   checks.push({
-    name: "pi-subagent-example",
-    level: existsSync(piSubagentExample) ? "ok" : "warn",
-    detail: existsSync(piSubagentExample)
-      ? piSubagentExample
-      : "official Pi subagent example not found (needed before M3)",
+    name: "pi-subagents-package",
+    level: piSubagentsOk ? "ok" : "fail",
+    detail: piSubagentsDetail,
+  });
+
+  const conflictingSubagents = [
+    join(piAgentDir, "npm/node_modules/pi-sub-agent/package.json"),
+    join(piAgentDir, "npm/node_modules/@tintinweb/pi-subagents/package.json"),
+    join(piAgentDir, "npm/node_modules/@mjakl/pi-subagent/package.json"),
+  ].filter(existsSync);
+  checks.push({
+    name: "pi-subagent-conflicts",
+    level: conflictingSubagents.length === 0 ? "ok" : "fail",
+    detail:
+      conflictingSubagents.length === 0
+        ? "no conflicting subagent packages"
+        : conflictingSubagents.join(", "),
+  });
+
+  const conflictingAuditorAgents = findPiAuditorAgentConflicts(piAgentDir);
+  checks.push({
+    name: "pi-auditor-agent-conflicts",
+    level: conflictingAuditorAgents.length === 0 ? "ok" : "fail",
+    detail:
+      conflictingAuditorAgents.length === 0
+        ? "no user agent shadows harness-reviewer"
+        : conflictingAuditorAgents.join(", "),
   });
 
   // Profiles
