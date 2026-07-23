@@ -87,6 +87,19 @@ test("evaluateAuditGate accepts a complete result for the exact SHAs", () => {
   assert.equal(gate.pass, true, gate.reason);
 });
 
+test("evaluateAuditGate treats a fail without actionable evidence as uncertain", () => {
+  const result = validAuditResult();
+  result.status = "fail";
+
+  const gate = evaluateAuditGate(result, {
+    expectedBaseSha: baseSha,
+    expectedHeadSha: headSha,
+  });
+
+  assert.equal(gate.pass, false);
+  assert.equal(gate.uncertain, true);
+});
+
 test("trackedDirty fails closed when git cannot run", () => {
   const originalPath = process.env.PATH;
   process.env.PATH = "";

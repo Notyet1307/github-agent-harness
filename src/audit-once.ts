@@ -12,6 +12,7 @@ import {
   evaluateAuditGate,
   loadAuditResult,
   trackedDirty,
+  type GateDecision,
 } from "./audit-gate.js";
 import {
   commitCountSince,
@@ -37,7 +38,10 @@ export type AuditOnceResult = {
   ok: boolean;
   jobId?: string;
   message: string;
-  details?: Record<string, unknown>;
+  details?: Record<string, unknown> & {
+    gate?: GateDecision;
+    gateFail?: boolean;
+  };
 };
 
 export function auditOnce(options: {
@@ -193,6 +197,21 @@ function auditOnceLocked(
         message: "audit passed; stopped before PR (M3)",
         details: audited.details,
       };
+    }
+
+    const gate = audited.details?.gate;
+    if (gate?.uncertain) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: audited.message,
+      });
+      setWorktreeProgress(
+        orcaCli,
+        job.worktree_id!,
+        `harness: blocked after uncertain audit r${round}`,
+        "in-review",
+      );
+      return audited;
     }
 
     // gate failed

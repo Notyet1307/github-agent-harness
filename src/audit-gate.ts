@@ -115,16 +115,19 @@ export function evaluateAuditGate(
   const statusFail = result.status === "fail";
   const computedFail =
     blockingStandards > 0 || blockingSpec > 0 || validationFailures > 0;
+  const uncertain = statusFail && !computedFail;
 
   if (statusFail || computedFail) {
     return {
       pass: false,
-      reason: `blocking findings standards=${blockingStandards} spec=${blockingSpec} validation=${validationFailures}`,
+      reason: uncertain
+        ? "audit failed without actionable evidence"
+        : `blocking findings standards=${blockingStandards} spec=${blockingSpec} validation=${validationFailures}`,
       result,
       blockingStandards,
       blockingSpec,
       validationFailures,
-      uncertain: false,
+      uncertain,
     };
   }
 
