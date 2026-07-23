@@ -1,0 +1,64 @@
+#!/bin/zsh
+set -eu
+
+script_dir=${0:A:h}
+harness_root=${script_dir:h}
+pi_agent_dir=${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}
+agent_dir="$harness_root/pi/auditor/agents"
+reviewer_child="$harness_root/scripts/pi-reviewer-child"
+subagents_package="$pi_agent_dir/npm/node_modules/pi-subagents/package.json"
+required_subagents_identity="pi-subagents@0.35.1"
+skills=(
+  "$harness_root/pi/implementer/skills/implement/SKILL.md"
+  "$harness_root/pi/implementer/skills/tdd/SKILL.md"
+  "$harness_root/pi/implementer/skills/code-review/SKILL.md"
+)
+skill_support=(
+  "$harness_root/pi/implementer/skills/tdd/tests.md"
+  "$harness_root/pi/implementer/skills/tdd/mocking.md"
+)
+extensions=(
+  "$pi_agent_dir/extensions/orca-prefill.ts"
+  "$pi_agent_dir/extensions/orca-agent-status.ts"
+  "$pi_agent_dir/npm/node_modules/pi-subagents/index.ts"
+)
+
+for required_path in $skills $skill_support "$agent_dir/harness-reviewer.md" "$reviewer_child" "$subagents_package" $extensions; do
+  if [[ ! -f "$required_path" ]]; then
+    print -u2 "pi-implementer: missing required resource: $required_path"
+    exit 1
+  fi
+done
+
+subagents_identity=$(node -e '
+  const pkg = require(process.argv[1]);
+  process.stdout.write(`${pkg.name ?? ""}@${pkg.version ?? ""}`);
+' "$subagents_package")
+if [[ "$subagents_identity" != "$required_subagents_identity" ]]; then
+  print -u2 "pi-implementer: requires $required_subagents_identity, found $subagents_identity"
+  exit 1
+fi
+
+export PI_SUBAGENT_EXTRA_AGENT_DIRS="$agent_dir"
+export PI_SUBAGENT_PI_BINARY="$reviewer_child"
+
+skill_args=()
+for skill_path in $skills; do
+  skill_args+=(--skill "$skill_path")
+done
+
+extension_args=()
+for extension_path in $extensions; do
+  extension_args+=(--extension "$extension_path")
+done
+
+exec pi \
+  --offline \
+  --no-skills \
+  $skill_args \
+  --no-prompt-templates \
+  --no-extensions \
+  $extension_args \
+  --no-approve \
+  --tools read,edit,write,bash,subagent \
+  "$@"

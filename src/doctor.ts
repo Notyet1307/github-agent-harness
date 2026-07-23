@@ -21,6 +21,22 @@ export type DoctorReport = {
   checks: Check[];
 };
 
+export function checkPiImplementerStartup(command: string): Check {
+  const smoke = execFile(command, ["--print", "--no-session"], {
+    timeoutMs: 30_000,
+  });
+  return {
+    name: "profile:implementer-smoke",
+    level: smoke.ok ? "ok" : "fail",
+    detail: smoke.ok
+      ? "launcher, explicit resources, and model selection start non-interactively"
+      : smoke.stderr.trim() ||
+        smoke.stdout.trim() ||
+        smoke.error ||
+        `launcher exited ${smoke.code ?? "unknown"}`,
+  };
+}
+
 export function findPiAuditorAgentConflicts(
   piAgentDir: string,
   homeDir = process.env.HOME ?? "",
@@ -106,6 +122,8 @@ export function runDoctor(configPath?: string): DoctorReport {
     });
     return { ok: false, checks };
   }
+  const impl = config.agentProfiles[config.activeProfiles.implementer];
+  const aud = config.agentProfiles[config.activeProfiles.auditor];
 
   // gh
   const ghPath = which("gh");
@@ -120,8 +138,13 @@ export function runDoctor(configPath?: string): DoctorReport {
     });
   }
 
-  // codex / pi
-  for (const bin of ["codex", "pi"] as const) {
+  // Agent CLIs required by the active profiles.
+  const activeAgentBins = new Set(
+    [impl?.orcaAgent, aud?.orcaAgent].filter(
+      (bin): bin is "codex" | "pi" => bin === "codex" || bin === "pi",
+    ),
+  );
+  for (const bin of activeAgentBins) {
     const path = which(bin);
     if (!path) {
       checks.push({ name: bin, level: "fail", detail: `${bin} not found` });
@@ -129,25 +152,57 @@ export function runDoctor(configPath?: string): DoctorReport {
       const ver = execFile(bin, ["--version"]);
       checks.push({
         name: bin,
-        level: "ok",
-        detail: `${path} (${(ver.stdout || ver.stderr).trim() || "version unknown"})`,
+        level: ver.ok ? "ok" : "fail",
+        detail: ver.ok
+          ? `${path} (${ver.stdout.trim() || "version unknown"})`
+          : ver.stderr.trim() || ver.error || `${bin} --version failed`,
       });
     }
   }
 
-  // Implementer skill
-  const skillRoot = join(process.env.HOME ?? "", ".agents/skills");
-  const implementSkillPath = join(skillRoot, "implement", "SKILL.md");
-  checks.push({
-    name: "skill:implement",
-    level: existsSync(implementSkillPath) ? "ok" : "warn",
-    detail: existsSync(implementSkillPath)
-      ? implementSkillPath
-      : `missing ${implementSkillPath} (Codex implement path needs it)`,
-  });
+  if (impl?.orcaAgent === "codex") {
+    const skillRoot = join(process.env.HOME ?? "", ".agents/skills");
+    const implementSkillPath = join(skillRoot, "implement", "SKILL.md");
+    checks.push({
+      name: "skill:implement",
+      level: existsSync(implementSkillPath) ? "ok" : "warn",
+      detail: existsSync(implementSkillPath)
+        ? implementSkillPath
+        : `missing ${implementSkillPath} (Codex implement path needs it)`,
+    });
+  }
 
-  // Controller-owned Pi audit resources
+  const piAgentDir =
+    process.env.PI_CODING_AGENT_DIR ??
+    join(process.env.HOME ?? "", ".pi/agent");
+
+  // Controller-owned Pi resources
   for (const [name, resourcePath] of [
+    ["pi-implementer-launcher", join(HARNESS_ROOT, "scripts/pi-implementer")],
+    [
+      "pi-implementer-reviewer-child",
+      join(HARNESS_ROOT, "scripts/pi-reviewer-child"),
+    ],
+    [
+      "pi-implementer-skill:implement",
+      join(HARNESS_ROOT, "pi/implementer/skills/implement/SKILL.md"),
+    ],
+    [
+      "pi-implementer-skill:tdd",
+      join(HARNESS_ROOT, "pi/implementer/skills/tdd/SKILL.md"),
+    ],
+    [
+      "pi-implementer-skill:tdd-tests",
+      join(HARNESS_ROOT, "pi/implementer/skills/tdd/tests.md"),
+    ],
+    [
+      "pi-implementer-skill:tdd-mocking",
+      join(HARNESS_ROOT, "pi/implementer/skills/tdd/mocking.md"),
+    ],
+    [
+      "pi-implementer-skill:code-review",
+      join(HARNESS_ROOT, "pi/implementer/skills/code-review/SKILL.md"),
+    ],
     ["pi-auditor-launcher", join(HARNESS_ROOT, "scripts/pi-auditor")],
     [
       "pi-auditor-skill",
@@ -157,6 +212,18 @@ export function runDoctor(configPath?: string): DoctorReport {
       "pi-auditor-agent",
       join(HARNESS_ROOT, "pi/auditor/agents/harness-reviewer.md"),
     ],
+    [
+      "pi-implementer-extension:orca-prefill",
+      join(piAgentDir, "extensions/orca-prefill.ts"),
+    ],
+    [
+      "pi-implementer-extension:orca-status",
+      join(piAgentDir, "extensions/orca-agent-status.ts"),
+    ],
+    [
+      "pi-subagents-extension",
+      join(piAgentDir, "npm/node_modules/pi-subagents/index.ts"),
+    ],
   ] as const) {
     checks.push({
       name,
@@ -165,9 +232,6 @@ export function runDoctor(configPath?: string): DoctorReport {
     });
   }
 
-  const piAgentDir =
-    process.env.PI_CODING_AGENT_DIR ??
-    join(process.env.HOME ?? "", ".pi/agent");
   const piSubagentsPackage = join(
     piAgentDir,
     "npm/node_modules/pi-subagents/package.json",
@@ -180,7 +244,8 @@ export function runDoctor(configPath?: string): DoctorReport {
         name?: string;
         version?: string;
       };
-      piSubagentsOk = pkg.name === "pi-subagents" && Boolean(pkg.version);
+      piSubagentsOk =
+        pkg.name === "pi-subagents" && pkg.version === "0.35.1";
       piSubagentsDetail = `${pkg.name ?? "pi-subagents"}@${pkg.version ?? "unknown"} (${piSubagentsPackage})`;
     } catch (err) {
       piSubagentsDetail = `invalid ${piSubagentsPackage}: ${(err as Error).message}`;
@@ -191,6 +256,10 @@ export function runDoctor(configPath?: string): DoctorReport {
     level: piSubagentsOk ? "ok" : "fail",
     detail: piSubagentsDetail,
   });
+
+  if (impl?.orcaAgent === "pi" && impl.command) {
+    checks.push(checkPiImplementerStartup(impl.command));
+  }
 
   const conflictingSubagents = [
     join(piAgentDir, "npm/node_modules/pi-sub-agent/package.json"),
@@ -217,8 +286,6 @@ export function runDoctor(configPath?: string): DoctorReport {
   });
 
   // Profiles
-  const impl = config.agentProfiles[config.activeProfiles.implementer];
-  const aud = config.agentProfiles[config.activeProfiles.auditor];
   checks.push({
     name: "profile:implementer",
     level: impl ? "ok" : "fail",

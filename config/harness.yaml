@@ -18,12 +18,20 @@ orca:
   controllerWorktreePath: /Users/yang/github-agent-harness
   controllerTitle: harness-controller
 
-# Role → profile id. Swap implementer to a Pi profile later without code changes.
+# Role → profile id.
 activeProfiles:
-  implementer: codex-default
+  implementer: pi-implementer
   auditor: pi-reviewer
 
 agentProfiles:
+  pi-implementer:
+    id: pi-implementer
+    role: implementer
+    runtime: orca
+    orcaAgent: pi
+    command: "/Users/yang/github-agent-harness/scripts/pi-implementer"
+    invokeHint: "Explicitly invoke /skill:implement. Commit the intended implementation before /skill:code-review, review from the dispatched fixed base SHA, then address and commit any findings."
+
   codex-default:
     id: codex-default
     role: implementer
@@ -41,17 +49,6 @@ agentProfiles:
     command: "/Users/yang/github-agent-harness/scripts/pi-auditor"
     readonly: true
     invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA. Use only the controller-owned harness-reviewer in user scope."
-
-  # Example future implementer (not active):
-  # pi-implementer-a:
-  #   id: pi-implementer-a
-  #   role: implementer
-  #   runtime: orca
-  #   orcaAgent: pi
-  #   command: "pi"
-  #   env:
-  #     PI_CODING_AGENT_DIR: /Users/yang/.pi/profiles/implementer-a
-  #   invokeHint: "Explicitly run the implement skill for this issue."
 
 repositories:
   - github: Notyet1307/harness-sandbox

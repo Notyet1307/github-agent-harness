@@ -15,8 +15,8 @@ export type MergePolicy = {
 export type AgentRole = "implementer" | "auditor";
 
 /**
- * Pluggable agent profile. V1 ships codex implementer + pi auditor stub.
- * Future: multiple Pi profiles with different providers/extensions.
+ * Pluggable agent profile. The active roles use controller-owned Pi launchers;
+ * the inactive Codex profile remains an explicit rollback option.
  */
 export type AgentProfile = {
   id: string;

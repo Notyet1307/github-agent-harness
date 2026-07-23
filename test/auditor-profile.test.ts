@@ -19,6 +19,10 @@ test("active auditor uses the controller-owned Pi launcher", () => {
   assert.equal(profile.readonly, true);
   assert.match(profile.command ?? "", /\/scripts\/pi-auditor$/);
   assert.match(profile.invokeHint, /matt-code-review-pi/);
+  assert.match(
+    readFileSync(join(process.cwd(), "scripts/pi-auditor"), "utf8"),
+    /reviewer_child=.*pi-reviewer-child[\s\S]*export PI_SUBAGENT_PI_BINARY="\$reviewer_child"/,
+  );
 });
 
 test("auditor dispatch requires the controller-owned user-scope reviewer", () => {

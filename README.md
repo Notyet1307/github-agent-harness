@@ -3,7 +3,7 @@
 Single-task, merge-gated coding harness.
 
 ```text
-Picker → Ledger Claim → Orca Worktree → Codex $implement
+Picker → Ledger Claim → Orca Worktree → Pi /skill:implement
   → Pi dual-axis audit → Gate → PR → Wait merge → Next
 ```
 
@@ -114,17 +114,33 @@ Implementer and auditor are **roles** bound to **profiles** (Codex, Pi+provider 
 
 ```yaml
 activeProfiles:
-  implementer: codex-default   # swap later to a pi-* profile
+  implementer: pi-implementer
   auditor: pi-reviewer
 ```
 
-V1 only runs the implementer path end-to-end.
+The implementer launcher enables only:
+
+- built-in tools: `read`, `edit`, `write`, `bash`
+- extension tool: `subagent`
+- controller-owned Matt `implement` and `tdd` skills pinned to
+  [`ed37663`](https://github.com/mattpocock/skills/tree/ed37663cc5fbef691ddfecd080dff42f7e7e350d),
+  plus the controller-owned Pi `code-review` adapter
+- Orca prefill/status extensions and the installed `pi-subagents` extension
+
+It disables automatic skill, extension, prompt-template, and project Pi
+resource loading. Repository `AGENTS.md` / `CLAUDE.md` context remains enabled.
+ReadSeek is intentionally not loaded. Internal reviewer children use a wrapper
+that removes the parent Orca lifecycle handles before Pi starts.
+
+The tool allowlist is not an OS sandbox: `bash` and extensions still run with
+the permissions of the Orca-launched Pi process. Filesystem, credential, and
+network isolation must be enforced outside Pi.
 
 ## Hard rules (V1)
 
 1. Agents never mutate GitHub labels.
 2. Global max 1 in-flight issue until merged/cancelled.
-3. Codex and Pi never write the same worktree concurrently.
+3. Only the implementer writes the worktree; the auditor stays read-only.
 4. No PR before Pi pass.
 5. No next claim before PR merge.
 6. Closed-unmerged / audit exhausted / issue revoked → block, do not skip ahead.

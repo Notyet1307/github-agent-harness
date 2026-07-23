@@ -49,9 +49,26 @@ Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profi
 | Smells | Non-blocking alone | Matches Matt dual-axis semantics |
 | M3 stop state | `audit_passed` | No PR until M4 |
 
+## 2026-07-23 — Pi implementer
+
+| Decision | Choice | Why |
+|---|---|---|
+| Active implementer | `pi-implementer` | Use Pi for both initial implementation and rework without changing role/state transitions |
+| Parent tools | `read,edit,write,bash,subagent` | Minimum surface that can implement, validate, commit, and run the required internal review |
+| Skills | Verbatim Matt `implement` / `tdd` at `ed37663`, plus a Pi adapter of Matt `code-review` | Preserve the approved workflow while replacing its unavailable `Agent` orchestration |
+| Extensions | Orca prefill/status and the existing pinned `pi-subagents` install | Lifecycle visibility plus two isolated internal review axes; no UI-only extension |
+| Internal reviewer | Reuse controller-owned `harness-reviewer`, user scope, fresh context, no artifacts; launch children through an env-scrubbing wrapper | Avoid duplicate agents and keep Orca lifecycle credentials in the parent |
+| Project resources | `--no-approve`, automatic skills/extensions/templates disabled | Target repositories cannot redefine the worker role or tool surface |
+| ReadSeek | Not loaded | Pi built-in edit/write are sufficient for the baseline; avoid extra write/rename tools and project settings |
+| Security boundary | External to Pi | `--tools` is not a filesystem/network sandbox, especially with `bash` and TypeScript extensions |
+
+The inactive `codex-default` profile remains as an explicit rollback option.
+Provider/model and `PI_CODING_AGENT_DIR` isolation between Pi roles remains
+deferred; both launchers currently use the configured parent Pi environment.
+
 ## Deferred — multiple Pi profiles by role
 
-**Status:** not building now; keep the seam open.
+**Status:** provider/model/config-directory isolation is not built; keep the seam open.
 
 Intent:
 
