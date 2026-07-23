@@ -9,6 +9,7 @@ import {
   commitCountSince,
   currentBranch,
   ensureBranch,
+  git,
   isPushed,
   logOnelineSince,
   refreshBaseRef,
@@ -19,12 +20,14 @@ import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { pickForRepo } from "./picker.js";
 import { renderImplementerSpec } from "./prompts.js";
+import { IMPLEMENT_NO_COMMITS_ERROR } from "./reconcile.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import {
   dispatchTaskEnsured,
   ensureAgentTerminal,
   ensureControllerTerminal,
   ensureIssueWorktree,
+  orchestrationTaskStatus,
   setWorktreeProgress,
   waitWorkerDone,
 } from "./orca-runtime.js";
@@ -37,6 +40,13 @@ export type RunOnceResult = {
   details?: Record<string, unknown>;
 };
 
+type BlockedImplementationRecovery = {
+  action: "retry" | "finalize";
+  jobId: string;
+  taskId: string;
+  dispatchId: string | null;
+};
+
 export function runOnce(options: {
   configPath?: string;
   ledgerPath?: string;
@@ -44,6 +54,8 @@ export function runOnce(options: {
   repoFilter?: string;
   /** If set, resume/force this issue number instead of picking. */
   issueNumber?: number;
+  /** Revalidate this exact blocked implementation while locked. */
+  blockedImplementationRecovery?: BlockedImplementationRecovery;
 }): RunOnceResult {
   const config = loadConfig(options.configPath);
   const lock = acquireLock(options.lockPath ?? defaultLockPath());
@@ -63,7 +75,11 @@ export function runOnce(options: {
 function runOnceLocked(
   config: HarnessConfig,
   ledger: Ledger,
-  options: { repoFilter?: string; issueNumber?: number },
+  options: {
+    repoFilter?: string;
+    issueNumber?: number;
+    blockedImplementationRecovery?: BlockedImplementationRecovery;
+  },
 ): RunOnceResult {
   const log = (msg: string) => {
     process.stdout.write(`[run-once] ${msg}\n`);
@@ -89,6 +105,36 @@ function runOnceLocked(
   // 1) Resume active job or claim new
   let job = ledger.getActiveJob();
   let repo: RepoConfig | undefined;
+  const blockedRecovery = options.blockedImplementationRecovery;
+
+  if (
+    blockedRecovery &&
+    (!job ||
+      job.id !== blockedRecovery.jobId ||
+      job.state !== "blocked" ||
+      job.last_error !== IMPLEMENT_NO_COMMITS_ERROR ||
+      job.implementer_task_id !== blockedRecovery.taskId ||
+      job.implementer_dispatch_id !== blockedRecovery.dispatchId)
+  ) {
+    return {
+      ok: false,
+      jobId: job?.id,
+      message: "blocked implementation changed before recovery",
+    };
+  }
+  if (blockedRecovery) {
+    const taskStatus = orchestrationTaskStatus(
+      orcaCli,
+      blockedRecovery.taskId,
+    )?.toLowerCase();
+    if (taskStatus !== "completed" && taskStatus !== "failed") {
+      return {
+        ok: false,
+        jobId: job!.id,
+        message: "blocked implementation task is not confirmed ended",
+      };
+    }
+  }
 
   if (job) {
     log(`resuming active job ${job.id} state=${job.state} ${job.repo}#${job.issue_number}`);
@@ -125,24 +171,72 @@ function runOnceLocked(
       };
     }
     if (job.state === "blocked") {
-      // Allow automatic retry of blocked jobs that never got a worktree /
-      // never dispatched (transient Orca failures). Hard blocks after
-      // implement still need human cancel.
-      const retryable =
-        !job.implementer_task_id &&
-        (job.last_error ?? "").toLowerCase().includes("orca");
-      if (!retryable) {
-        return {
-          ok: false,
-          jobId: job.id,
-          message: `job is blocked: ${job.last_error ?? "no detail"}`,
-        };
+      if (blockedRecovery) {
+        const worktreePath = job.worktree_path;
+        const baseSha = job.base_sha;
+        const headSha = worktreePath
+          ? revParse(worktreePath, "HEAD")
+          : null;
+        const tracked = worktreePath
+          ? git(worktreePath, ["status", "--porcelain", "-uno"])
+          : null;
+        if (!baseSha || !headSha || !tracked?.ok) {
+          const error =
+            "implementation recovery revalidation failed: unreadable base, HEAD, or tracked status";
+          job = ledger.updateJob(job.id, { last_error: error });
+          return { ok: false, jobId: job.id, message: error };
+        }
+        if (headSha !== baseSha) {
+          const commits = commitCountSince(worktreePath!, baseSha);
+          if (commits < 1 || tracked.stdout) {
+            const error =
+              "implementation recovery revalidation found a changed or dirty HEAD";
+            job = ledger.updateJob(job.id, { last_error: error });
+            return { ok: false, jobId: job.id, message: error };
+          }
+          log("implementation commits landed before recovery; finalizing");
+          job = ledger.updateJob(job.id, {
+            state: "implementing",
+            last_error: null,
+            head_sha: headSha,
+          });
+        } else if (blockedRecovery.action === "retry") {
+          log("explicitly retrying blocked implementation");
+          job = ledger.updateJob(job.id, {
+            implementer_terminal_handle: null,
+            implementer_task_id: null,
+            implementer_dispatch_id: null,
+            dispatch_attempt: 0,
+            dispatch_probe_pending: 0,
+            last_error: null,
+            head_sha: null,
+          });
+        } else {
+          const error =
+            "implementation finalize revalidation found no commits since base";
+          job = ledger.updateJob(job.id, { last_error: error });
+          return { ok: false, jobId: job.id, message: error };
+        }
+      } else {
+        // Allow automatic retry of blocked jobs that never got a worktree /
+        // never dispatched (transient Orca failures). Hard blocks after
+        // implement still need human cancel.
+        const retryable =
+          !job.implementer_task_id &&
+          (job.last_error ?? "").toLowerCase().includes("orca");
+        if (!retryable) {
+          return {
+            ok: false,
+            jobId: job.id,
+            message: `job is blocked: ${job.last_error ?? "no detail"}`,
+          };
+        }
+        log(`retrying blocked job after Orca error: ${job.last_error}`);
+        job = ledger.updateJob(job.id, {
+          state: "claimed",
+          last_error: null,
+        });
       }
-      log(`retrying blocked job after Orca error: ${job.last_error}`);
-      job = ledger.updateJob(job.id, {
-        state: "claimed",
-        last_error: null,
-      });
     }
   } else {
     const repos = options.repoFilter
@@ -344,15 +438,15 @@ function runOnceLocked(
 
   // Refresh implementer terminal handle if missing
   if (!job.implementer_terminal_handle && job.worktree_id) {
-    const refreshed = ensureIssueWorktree(
+    const handle = ensureAgentTerminal(
       orcaCli,
-      repo,
-      job.issue_number,
+      job.worktree_id,
       implementer,
+      `issue-${job.issue_number}-${implementer.orcaAgent}`,
     );
-    if (refreshed.ok && refreshed.value.agentTerminalHandle) {
+    if (handle) {
       job = ledger.updateJob(job.id, {
-        implementer_terminal_handle: refreshed.value.agentTerminalHandle,
+        implementer_terminal_handle: handle,
       });
     }
   }
@@ -435,13 +529,26 @@ function runOnceLocked(
       },
     });
     if (!ensured.ok) {
-      const exhausted = ensured.kind === "exhausted";
+      const hasLastTask = ensured.lastTaskId !== undefined;
+      const taskId = ensured.lastTaskId ?? job.implementer_task_id;
+      const dispatchId = hasLastTask
+        ? ensured.lastDispatchId ?? null
+        : job.implementer_dispatch_id;
+      const shouldBlock =
+        ensured.kind === "exhausted" ||
+        (hasLastTask && dispatchId === null) ||
+        blockedRecovery?.action === "retry";
       job = ledger.updateJob(job.id, {
-        state: exhausted ? "blocked" : job.state,
+        state: shouldBlock ? "blocked" : job.state,
         last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
         implementer_terminal_handle: ensured.to,
+        implementer_task_id: taskId,
+        implementer_dispatch_id: dispatchId,
+        dispatch_attempt: hasLastTask
+          ? ensured.lastAttempt ?? 0
+          : job.dispatch_attempt,
         dispatch_probe_pending:
-          exhausted || !job.implementer_task_id ? 0 : 1,
+          shouldBlock || !taskId ? 0 : 1,
       });
       setWorktreeProgress(
         orcaCli,
@@ -575,7 +682,7 @@ function runOnceLocked(
   if (headSha === baseSha || commits < 1) {
     job = ledger.updateJob(job.id, {
       state: "blocked",
-      last_error: "implement finished but no commits since base",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
       head_sha: headSha,
     });
     setWorktreeProgress(

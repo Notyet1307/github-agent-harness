@@ -29,6 +29,79 @@ test("keeps waiting after decision_gate until the same task sends worker_done", 
   );
 });
 
+test("ignores stale, malformed, conflicting, or wrong-type completion payloads", () => {
+  const fake = makeFakeOrca("stale-string-then-done");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-current",
+    dispatchId: "dispatch-current",
+    timeoutMs: 3_000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(
+    fake
+      .calls()
+      .filter(
+        (args) =>
+          args[0] === "orchestration" && args[1] === "check",
+      ).length,
+    6,
+  );
+});
+
+test("accepts task provenance alone for a legacy dispatch without an id", () => {
+  const fake = makeFakeOrca("task-only-done");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-current",
+    dispatchId: null,
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test("rejects a dispatch response without a dispatch id", () => {
+  const fake = makeFakeOrca("missing-dispatch-id");
+  const result = dispatchTaskEnsured(fake.command, {
+    title: "Implement example#1",
+    displayName: "issue-1-implement",
+    spec: "do the work",
+    to: "term-1",
+    from: "controller-1",
+    probeTimeoutMs: 0,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /missing dispatchId/);
+  if (!result.ok) {
+    assert.equal(result.lastTaskId, "task-1");
+    assert.equal(result.lastDispatchId, null);
+    assert.equal(result.lastAttempt, 1);
+  }
+});
+
+test("rejects a non-string dispatch id", () => {
+  const fake = makeFakeOrca("wrong-dispatch-id-type");
+  const result = dispatchTaskEnsured(fake.command, {
+    title: "Implement example#1",
+    displayName: "issue-1-implement",
+    spec: "do the work",
+    to: "term-1",
+    from: "controller-1",
+    probeTimeoutMs: 0,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /missing dispatchId/);
+  if (!result.ok) {
+    assert.equal(result.lastTaskId, "task-1");
+    assert.equal(result.lastDispatchId, null);
+    assert.equal(result.lastAttempt, 1);
+  }
+});
+
 test("requires tui-idle before creating an orchestration task", () => {
   const fake = makeFakeOrca("not-idle");
   const result = dispatchTaskEnsured(fake.command, {
@@ -180,12 +253,37 @@ test("does not redispatch when the first task cannot be marked failed", () => {
   });
 
   assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.lastTaskId, "task-1");
+    assert.equal(result.lastDispatchId, "dispatch-1");
+    assert.equal(result.lastAttempt, 1);
+  }
   assert.equal(
     fake.calls().filter(
       (args) => args[0] === "orchestration" && args[1] === "task-create",
     ).length,
     1,
   );
+});
+
+test("reports the second attempt provenance as one tuple", () => {
+  const fake = makeFakeOrca("silent-idle");
+  const result = dispatchTaskEnsured(fake.command, {
+    title: "Implement example#1",
+    displayName: "issue-1-implement",
+    spec: "do the work",
+    to: "term-1",
+    from: "controller-1",
+    probeTimeoutMs: 50,
+    recreateAgentTerminal: () => "term-2",
+  });
+
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.lastTaskId, "task-2");
+    assert.equal(result.lastDispatchId, "dispatch-2");
+    assert.equal(result.lastAttempt, 2);
+  }
 });
 
 test("resumes a persisted dispatch without creating another task", () => {
@@ -225,7 +323,11 @@ function makeFakeOrca(
     | "silent-then-working"
     | "task-update-fails"
     | "existing-task"
-    | "decision-then-done",
+    | "decision-then-done"
+    | "stale-string-then-done"
+    | "task-only-done"
+    | "missing-dispatch-id"
+    | "wrong-dispatch-id-type",
 ): {
   command: string;
   calls: () => string[][];
@@ -257,7 +359,9 @@ if (key === "terminal wait") {
     mode === "silent-idle" ||
     mode === "silent-then-working" ||
     mode === "task-update-fails" ||
-    mode === "existing-task"
+    mode === "existing-task" ||
+    mode === "missing-dispatch-id" ||
+    mode === "wrong-dispatch-id-type"
   ) {
     console.log(JSON.stringify({ ok: true, result: { wait: { satisfied: true, status: "idle", blockedReason: null } } }));
   } else if ((mode === "cursor-working" || mode === "probe-unknown") && state.waits === 1) {
@@ -305,7 +409,14 @@ if (key === "terminal wait") {
   writeFileSync(statePath, JSON.stringify(state));
   console.log(JSON.stringify({ ok: true, result: { taskId: "task-" + state.tasks } }));
 } else if (key === "orchestration dispatch") {
-  console.log(JSON.stringify({ ok: true, result: { dispatchId: "dispatch-" + state.tasks } }));
+  console.log(JSON.stringify({
+    ok: true,
+    result: mode === "missing-dispatch-id"
+      ? {}
+      : mode === "wrong-dispatch-id-type"
+        ? { dispatchId: ["dispatch-" + state.tasks] }
+      : { dispatchId: "dispatch-" + state.tasks }
+  }));
 } else if (key === "orchestration task-update") {
   if (mode === "task-update-fails") {
     console.log(JSON.stringify({ ok: false, error: { message: "task update unavailable" } }));
@@ -320,6 +431,38 @@ if (key === "terminal wait") {
     type: state.checks === 1 ? "decision_gate" : "worker_done",
     taskId: "task-1",
     dispatchId: "dispatch-1"
+  }] } }));
+} else if (key === "orchestration check" && mode === "stale-string-then-done") {
+  state.checks += 1;
+  writeFileSync(statePath, JSON.stringify(state));
+  const payload =
+    state.checks === 1
+      ? JSON.stringify({ taskId: "task-old", dispatchId: "dispatch-old" })
+      : state.checks === 2
+        ? "{"
+      : state.checks === 3
+          ? "{}"
+          : state.checks === 4
+            ? JSON.stringify({
+                taskId: ["task-current"],
+                dispatchId: ["dispatch-current"]
+              })
+            : state.checks === 5
+              ? JSON.stringify({ taskId: "task-old", dispatchId: "dispatch-old" })
+              : JSON.stringify({ taskId: "task-current", dispatchId: "dispatch-current" });
+  const message = {
+    type: state.checks === 4 ? ["worker_done"] : "worker_done",
+    payload
+  };
+  if (state.checks === 5) {
+    message.taskId = "task-current";
+    message.dispatchId = "dispatch-current";
+  }
+  console.log(JSON.stringify({ ok: true, result: { messages: [message] } }));
+} else if (key === "orchestration check" && mode === "task-only-done") {
+  console.log(JSON.stringify({ ok: true, result: { messages: [{
+    type: "worker_done",
+    taskId: "task-current"
   }] } }));
 } else {
   console.log(JSON.stringify({ ok: false, error: { message: "unexpected " + key } }));

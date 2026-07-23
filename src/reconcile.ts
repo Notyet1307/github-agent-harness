@@ -1,5 +1,8 @@
 import type { Job, JobState } from "./types.js";
 
+export const IMPLEMENT_NO_COMMITS_ERROR =
+  "implement finished but no commits since base";
+
 /**
  * Pure recovery routing for M5.
  * Controllers map each non-terminal state to the next safe command.
@@ -8,6 +11,8 @@ import type { Job, JobState } from "./types.js";
 export type RecoverAction =
   | { kind: "noop"; reason: string }
   | { kind: "run_once"; reason: string }
+  | { kind: "finalize_implement"; reason: string }
+  | { kind: "retry_implement"; reason: string }
   | { kind: "audit_once"; reason: string }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
@@ -52,7 +57,37 @@ export function reconcileJob(
     case "cancelled":
       return { kind: "noop", reason: `terminal state ${job.state}` };
 
-    case "blocked":
+    case "blocked": {
+      const implementationEnded =
+        job.implementer_task_id &&
+        job.last_error === IMPLEMENT_NO_COMMITS_ERROR &&
+        hints.worktreeExists === true &&
+        ["completed", "failed"].includes(
+          hints.implementTaskStatus?.toLowerCase() ?? "",
+        );
+      if (
+        implementationEnded &&
+        hints.hasCommitsSinceBase === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "finalize_implement",
+          reason:
+            "implementation commits landed after the completion signal; finalize the same issue",
+        };
+      }
+      if (
+        implementationEnded &&
+        hints.currentHeadSha === job.base_sha &&
+        hints.hasCommitsSinceBase === false &&
+        typeof hints.trackedClean === "boolean"
+      ) {
+        return {
+          kind: "retry_implement",
+          reason:
+            "implementation task ended without commits; explicit recovery may redispatch the same issue",
+        };
+      }
       if (
         job.auditor_task_id &&
         job.audit_round > 0 &&
@@ -72,6 +107,7 @@ export function reconcileJob(
         kind: "blocked",
         reason: job.last_error ?? "blocked; needs human cancel/resume",
       };
+    }
 
     case "claimed":
     case "worktree_ready":

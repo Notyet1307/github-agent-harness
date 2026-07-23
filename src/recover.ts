@@ -98,6 +98,8 @@ export function recover(options: {
       lockPath: options.lockPath,
       waitMergeTimeoutMinutes: options.waitMergeTimeoutMinutes ?? 0,
       jobId: job?.id,
+      implementerTaskId: job?.implementer_task_id,
+      implementerDispatchId: job?.implementer_dispatch_id,
       hints,
     });
   } finally {
@@ -118,15 +120,44 @@ function executeAction(
     lockPath?: string;
     waitMergeTimeoutMinutes: number;
     jobId?: string;
+    implementerTaskId?: string | null;
+    implementerDispatchId?: string | null;
     hints: ReconcileHints;
   },
 ): RecoverResult {
   switch (action.kind) {
-    case "run_once": {
+    case "run_once":
+    case "finalize_implement":
+    case "retry_implement": {
+      const recoversBlockedImplementation =
+        action.kind === "retry_implement" ||
+        action.kind === "finalize_implement";
+      if (
+        recoversBlockedImplementation &&
+        (!opts.jobId || !opts.implementerTaskId)
+      ) {
+        return {
+          ok: false,
+          message: "recover→run-once: missing blocked implementation identity",
+          action,
+          jobId: opts.jobId,
+          executed: false,
+        };
+      }
       const r = runOnce({
         configPath: opts.configPath,
         ledgerPath: opts.ledgerPath,
         lockPath: opts.lockPath,
+        blockedImplementationRecovery:
+          recoversBlockedImplementation
+            ? {
+                action:
+                  action.kind === "retry_implement" ? "retry" : "finalize",
+                jobId: opts.jobId!,
+                taskId: opts.implementerTaskId!,
+                dispatchId: opts.implementerDispatchId ?? null,
+              }
+            : undefined,
       });
       return {
         ok: r.ok,
@@ -218,7 +249,9 @@ function gatherHints(
         "--porcelain",
         "-uno",
       ]);
-      hints.trackedClean = tracked.ok && !tracked.stdout.trim();
+      if (tracked.ok) {
+        hints.trackedClean = !tracked.stdout.trim();
+      }
 
       const resultPath = join(job.worktree_path, ".harness", "audit-result.json");
       if (head) {

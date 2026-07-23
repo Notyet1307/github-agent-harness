@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { reconcileJob, recoveryInvariants } from "../src/reconcile.js";
+import {
+  IMPLEMENT_NO_COMMITS_ERROR,
+  reconcileJob,
+  recoveryInvariants,
+} from "../src/reconcile.js";
 import type { Job } from "../src/types.js";
 
 function job(partial: Partial<Job> & { state: Job["state"] }): Job {
@@ -95,6 +99,89 @@ test("awaiting_merge closed unmerged → wait_merge (will block)", () => {
 
 test("blocked stays blocked", () => {
   const a = reconcileJob(job({ state: "blocked", last_error: "x" }));
+  assert.equal(a.kind, "blocked");
+});
+
+test("completed implementation without commits requires an explicit retry", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      currentHeadSha: "base",
+      hasCommitsSinceBase: false,
+      trackedClean: false,
+      implementTaskStatus: "completed",
+    },
+  );
+
+  assert.equal(a.kind, "retry_implement");
+});
+
+test("implementation retry requires a readable base HEAD and tracked status", () => {
+  for (const hints of [
+    {
+      worktreeExists: true,
+      currentHeadSha: null,
+      hasCommitsSinceBase: false,
+      trackedClean: false,
+      implementTaskStatus: "completed",
+    },
+    {
+      worktreeExists: true,
+      currentHeadSha: "base",
+      hasCommitsSinceBase: false,
+      implementTaskStatus: "completed",
+    },
+  ]) {
+    const a = reconcileJob(
+      job({
+        state: "blocked",
+        implementer_task_id: "task-implement",
+        last_error: IMPLEMENT_NO_COMMITS_ERROR,
+      }),
+      hints,
+    );
+    assert.equal(a.kind, "blocked");
+  }
+});
+
+test("completed implementation with clean commits can be finalized", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: true,
+      trackedClean: true,
+      implementTaskStatus: "completed",
+    },
+  );
+
+  assert.equal(a.kind, "finalize_implement");
+});
+
+test("premature completion stays blocked while its task is still live", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: false,
+      trackedClean: false,
+      implementTaskStatus: "dispatched",
+    },
+  );
+
   assert.equal(a.kind, "blocked");
 });
 

@@ -12,6 +12,22 @@ test("blocked → blocked_wait (do not claim next)", () => {
   assert.equal(p.step, "blocked_wait");
 });
 
+test("implementation retry waits for explicit recover execution", () => {
+  const p = planWatchCycle({
+    kind: "retry_implement",
+    reason: "premature completion",
+  });
+  assert.equal(p.step, "blocked_wait");
+});
+
+test("completed implementation with commits resumes finalization", () => {
+  const p = planWatchCycle({
+    kind: "finalize_implement",
+    reason: "commits landed after completion signal",
+  });
+  assert.equal(p.step, "resume");
+});
+
 test("run_once/audit/publish/wait_merge → resume", () => {
   for (const kind of [
     "run_once",

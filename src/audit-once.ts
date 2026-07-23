@@ -436,13 +436,25 @@ function runAuditPhase(
           }),
       });
       if (!ensured.ok) {
-        const exhausted = ensured.kind === "exhausted";
+        const hasLastTask = ensured.lastTaskId !== undefined;
+        const taskId = ensured.lastTaskId ?? job.auditor_task_id;
+        const dispatchId = hasLastTask
+          ? ensured.lastDispatchId ?? null
+          : job.auditor_dispatch_id;
+        const shouldBlock =
+          ensured.kind === "exhausted" ||
+          (hasLastTask && dispatchId === null);
         job = ledger.updateJob(job.id, {
-          state: exhausted ? "blocked" : job.state,
+          state: shouldBlock ? "blocked" : job.state,
           last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
           auditor_terminal_handle: ensured.to,
+          auditor_task_id: taskId,
+          auditor_dispatch_id: dispatchId,
+          dispatch_attempt: hasLastTask
+            ? ensured.lastAttempt ?? 0
+            : job.dispatch_attempt,
           dispatch_probe_pending:
-            exhausted || !job.auditor_task_id ? 0 : 1,
+            shouldBlock || !taskId ? 0 : 1,
         });
         return { ok: false, jobId: job.id, message: ensured.error };
       }
@@ -701,13 +713,25 @@ function runReworkPhase(
         ),
     });
     if (!ensured.ok) {
-      const exhausted = ensured.kind === "exhausted";
+      const hasLastTask = ensured.lastTaskId !== undefined;
+      const taskId = ensured.lastTaskId ?? job.implementer_task_id;
+      const dispatchId = hasLastTask
+        ? ensured.lastDispatchId ?? null
+        : job.implementer_dispatch_id;
+      const shouldBlock =
+        ensured.kind === "exhausted" ||
+        (hasLastTask && dispatchId === null);
       job = ledger.updateJob(job.id, {
-        state: exhausted ? "blocked" : "reworking",
+        state: shouldBlock ? "blocked" : "reworking",
         last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
         implementer_terminal_handle: ensured.to,
+        implementer_task_id: taskId,
+        implementer_dispatch_id: dispatchId,
+        dispatch_attempt: hasLastTask
+          ? ensured.lastAttempt ?? 0
+          : job.dispatch_attempt,
         dispatch_probe_pending:
-          exhausted || !job.implementer_task_id ? 0 : 1,
+          shouldBlock || !taskId ? 0 : 1,
       });
       return { ok: false, jobId: job.id, message: ensured.error };
     }

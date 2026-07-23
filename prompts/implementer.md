@@ -21,9 +21,16 @@ You are the **implementer** role for this harness job. Do not act as publisher o
 6. Use TDD where appropriate.
 7. Run focused tests during implementation.
 8. Run repository-required full validation before completion (`npm test`, and lint/typecheck/build if defined).
-9. Follow the implement skill's internal review step if the skill requires it.
+9. Run the implement skill's required internal review and address its actionable findings.
 10. Commit all intended changes to the current branch.
 11. Ensure `git status` has no unintended tracked changes.
+
+## Internal subagents
+
+- If a skill uses internal review subagents, spawn them without inherited conversation context (`fork_turns: "none"` or the runtime equivalent) and pass only the review inputs they need.
+- Internal subagents must not receive any Orca controller handle, `taskId`, `dispatchId`, lifecycle preamble, or lifecycle command.
+- Internal subagents must not call Orca or send `worker_done`, heartbeat, escalation, or decision-gate messages. They return review reports only to this parent session.
+- Only the parent implementer session may send `worker_done`, after the required internal review, intended commit, and validation are complete.
 
 ## Restrictions
 

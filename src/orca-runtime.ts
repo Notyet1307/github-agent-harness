@@ -20,7 +20,7 @@ export type TaskCreateResult = {
 };
 
 export type DispatchResult = {
-  dispatchId: string | null;
+  dispatchId: string;
   raw: unknown;
 };
 
@@ -39,8 +39,15 @@ type DispatchAttemptFailure = {
   ok: false;
   error: string;
   kind: "retryable" | "interactive" | "unknown";
+  attempt: 1 | 2;
   taskId?: string;
   dispatchId?: string | null;
+};
+
+type LastDispatchProvenance = {
+  lastTaskId?: string;
+  lastDispatchId?: string | null;
+  lastAttempt?: 1 | 2;
 };
 
 export function ensureControllerTerminal(
@@ -543,6 +550,8 @@ export function dispatchTaskEnsured(
       error: string;
       to: string;
       lastTaskId?: string;
+      lastDispatchId?: string | null;
+      lastAttempt?: 1 | 2;
       kind: "not-ready" | "interactive" | "unknown" | "exhausted";
     } {
   const log = input.onLog ?? (() => {});
@@ -608,6 +617,7 @@ export function dispatchTaskEnsured(
         kind: accepted.interactive ? "interactive" : "unknown",
         taskId,
         dispatchId,
+        attempt,
       };
     }
 
@@ -620,6 +630,7 @@ export function dispatchTaskEnsured(
         kind: "unknown",
         taskId,
         dispatchId,
+        attempt,
       };
     }
     return {
@@ -628,6 +639,7 @@ export function dispatchTaskEnsured(
       kind: "retryable",
       taskId,
       dispatchId,
+      attempt,
     };
   };
 
@@ -655,7 +667,12 @@ export function dispatchTaskEnsured(
       spec: input.spec,
     });
     if (!task.ok) {
-      return { ok: false, error: task.error, kind: "unknown" };
+      return {
+        ok: false,
+        error: task.error,
+        kind: "unknown",
+        attempt,
+      };
     }
 
     log(
@@ -667,12 +684,16 @@ export function dispatchTaskEnsured(
       from: input.from,
     });
     if (!disp.ok) {
-      failOrchestrationTask(orcaCli, task.value.taskId);
+      const failed = failOrchestrationTask(orcaCli, task.value.taskId);
       return {
         ok: false,
-        error: disp.error,
+        error: failed.ok
+          ? disp.error
+          : `${disp.error}; task could not be failed: ${failed.error}`,
         kind: "unknown",
         taskId: task.value.taskId,
+        dispatchId: null,
+        attempt,
       };
     }
 
@@ -690,6 +711,7 @@ export function dispatchTaskEnsured(
         kind: "unknown",
         taskId: task.value.taskId,
         dispatchId: disp.value.dispatchId,
+        attempt,
       };
     }
 
@@ -721,7 +743,7 @@ export function dispatchTaskEnsured(
       ok: false,
       error: first.error,
       to: firstTo,
-      lastTaskId: first.taskId,
+      ...lastDispatchProvenance(first),
       kind: first.kind,
     };
   }
@@ -731,7 +753,7 @@ export function dispatchTaskEnsured(
       ok: false,
       error: `dispatch not accepted after 2 attempts: ${first.error}`,
       to: firstTo,
-      lastTaskId: first.taskId,
+      ...lastDispatchProvenance(first),
       kind: "exhausted",
     };
   }
@@ -744,7 +766,7 @@ export function dispatchTaskEnsured(
       ok: false,
       error: "dispatch was idle but replacement agent terminal could not be created",
       to: firstTo,
-      lastTaskId: first.taskId,
+      ...lastDispatchProvenance(first),
       kind: "not-ready",
     };
   }
@@ -762,7 +784,7 @@ export function dispatchTaskEnsured(
         idle.blockedReason ??
         "replacement agent terminal did not reach tui-idle",
       to,
-      lastTaskId: first.taskId,
+      ...lastDispatchProvenance(first),
       kind: idle.blockedReason ? "interactive" : "not-ready",
     };
   }
@@ -775,7 +797,7 @@ export function dispatchTaskEnsured(
       ok: false,
       error: second.error,
       to,
-      lastTaskId: second.taskId ?? first.taskId,
+      ...lastDispatchProvenance(second, first),
       kind: second.kind,
     };
   }
@@ -784,8 +806,21 @@ export function dispatchTaskEnsured(
     ok: false,
     error: `dispatch not accepted after 2 attempts: ${second.error}`,
     to,
-    lastTaskId: second.taskId ?? first.taskId,
+    ...lastDispatchProvenance(second, first),
     kind: "exhausted",
+  };
+}
+
+function lastDispatchProvenance(
+  primary: DispatchAttemptFailure,
+  fallback?: DispatchAttemptFailure,
+): LastDispatchProvenance {
+  const source = primary.taskId ? primary : fallback?.taskId ? fallback : null;
+  if (!source?.taskId) return {};
+  return {
+    lastTaskId: source.taskId,
+    lastDispatchId: source.dispatchId ?? null,
+    lastAttempt: source.attempt,
   };
 }
 
@@ -844,11 +879,13 @@ export function createOrchestrationTask(
     return { ok: false, error: r.error ?? "task-create failed" };
   }
   const result = unwrapResult<{
-    taskId?: string;
-    task?: { id?: string };
-    id?: string;
+    taskId?: unknown;
+    task?: { id?: unknown };
+    id?: unknown;
   }>(r.data);
-  const taskId = result.taskId ?? result.task?.id ?? result.id;
+  const taskId = asNonEmptyString(
+    result.taskId ?? result.task?.id ?? result.id,
+  );
   if (!taskId) {
     return {
       ok: false,
@@ -877,12 +914,19 @@ export function dispatchTask(
     return { ok: false, error: r.error ?? "dispatch failed" };
   }
   const result = unwrapResult<{
-    dispatchId?: string;
-    dispatch?: { id?: string };
-    id?: string;
+    dispatchId?: unknown;
+    dispatch?: { id?: unknown };
+    id?: unknown;
   }>(r.data);
-  const dispatchId =
-    result.dispatchId ?? result.dispatch?.id ?? result.id ?? null;
+  const dispatchId = asNonEmptyString(
+    result.dispatchId ?? result.dispatch?.id ?? result.id,
+  );
+  if (!dispatchId) {
+    return {
+      ok: false,
+      error: `dispatch missing dispatchId: ${r.raw.slice(0, 800)}`,
+    };
+  }
   return { ok: true, value: { dispatchId, raw: r.data } };
 }
 
@@ -928,24 +972,34 @@ export function waitWorkerDone(
 
     const messages = extractMessages(r.data);
     for (const msg of messages) {
-      const type = String(msg.type ?? msg.messageType ?? "").toLowerCase();
-      const taskId = String(
-        msg.taskId ??
-          (msg.payload as { taskId?: string } | undefined)?.taskId ??
-          "",
-      );
-      const dispatchId = String(
-        msg.dispatchId ??
-          (msg.payload as { dispatchId?: string } | undefined)?.dispatchId ??
-          "",
-      );
+      const type = (
+        asNonEmptyString(msg.type) ??
+        asNonEmptyString(msg.messageType) ??
+        ""
+      ).toLowerCase();
+      const payload = parseMessagePayload(msg.payload);
+      const messageTaskId = asNonEmptyString(msg.taskId);
+      const payloadTaskId = asNonEmptyString(payload.taskId);
+      const messageDispatchId = asNonEmptyString(msg.dispatchId);
+      const payloadDispatchId = asNonEmptyString(payload.dispatchId);
+      if (
+        (messageTaskId &&
+          payloadTaskId &&
+          messageTaskId !== payloadTaskId) ||
+        (messageDispatchId &&
+          payloadDispatchId &&
+          messageDispatchId !== payloadDispatchId)
+      ) {
+        continue;
+      }
+      const taskId = messageTaskId ?? payloadTaskId;
+      const dispatchId = messageDispatchId ?? payloadDispatchId;
 
-      // Prefer matching taskId; if payload lacks it, accept any worker_done while we own one task.
-      const taskMatches = !taskId || taskId === input.taskId;
+      const taskMatches = taskId === input.taskId;
       const dispatchMatches =
-        !input.dispatchId || !dispatchId || dispatchId === input.dispatchId;
+        input.dispatchId === null || dispatchId === input.dispatchId;
 
-      if (type.includes("escalation") && taskMatches) {
+      if (type === "escalation" && taskMatches) {
         return {
           ok: false,
           error: "worker sent escalation",
@@ -953,13 +1007,13 @@ export function waitWorkerDone(
           message: msg,
         };
       }
-      if (type.includes("decision_gate") && taskMatches) {
+      if (type === "decision_gate" && taskMatches) {
         input.onTick?.(
           `worker raised decision_gate for task ${input.taskId}; continuing to wait`,
         );
         continue;
       }
-      if (type.includes("worker_done") && taskMatches && dispatchMatches) {
+      if (type === "worker_done" && taskMatches && dispatchMatches) {
         return { ok: true, message: msg };
       }
     }
@@ -972,6 +1026,26 @@ export function waitWorkerDone(
     ok: false,
     error: `timeout waiting for worker_done on task ${input.taskId}`,
   };
+}
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function parseMessagePayload(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return parsed && typeof parsed === "object"
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      return {};
+    }
+  }
+  return value && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
 }
 
 export function worktreePs(orcaCli: string): unknown {
@@ -991,9 +1065,11 @@ export function orchestrationTaskStatus(
   const r = orcaJson(orcaCli, ["orchestration", "task-list"]);
   if (!r.ok || !r.data) return null;
   const result = unwrapResult<{
-    tasks?: Array<{ id?: string; status?: string }>;
+    tasks?: Array<{ id?: unknown; status?: unknown }>;
   }>(r.data);
-  return result.tasks?.find((task) => task.id === taskId)?.status ?? null;
+  return asNonEmptyString(
+    result.tasks?.find((task) => task.id === taskId)?.status,
+  );
 }
 
 function extractMessages(data: unknown): OrchestrationMessage[] {

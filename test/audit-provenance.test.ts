@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { auditOnce } from "../src/audit-once.js";
 import { Ledger } from "../src/ledger.js";
 
-test("a fresh audit round does not reuse a pre-existing result", (t) => {
+test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
   const dir = mkdtempSync(join(tmpdir(), "audit-provenance-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -69,8 +69,26 @@ if (args[0] === "status") {
     terminals: [{ handle: "controller-1", title: "test-controller", connected: true }]
   } }));
 } else if (key === "terminal create") {
+  console.log(JSON.stringify({ ok: true, result: { handle: "pi-new" } }));
+} else if (key === "terminal wait") {
+  console.log(JSON.stringify({ ok: true, result: {
+    wait: { satisfied: true, status: "idle", blockedReason: null }
+  } }));
+} else if (key === "terminal read") {
+  console.log(JSON.stringify({ ok: true, result: { terminal: {
+    tail: [],
+    nextCursor: "1",
+    latestCursor: "1"
+  } } }));
+} else if (key === "orchestration task-create") {
+  console.log(JSON.stringify({ ok: true, result: {
+    taskId: "task-audit-new"
+  } }));
+} else if (key === "orchestration dispatch") {
+  console.log(JSON.stringify({ ok: true, result: {} }));
+} else if (key === "orchestration task-update") {
   console.log(JSON.stringify({ ok: false, error: {
-    message: "auditor terminal disabled by test"
+    message: "task update unavailable"
   } }));
   process.exitCode = 1;
 } else if (key === "worktree set") {
@@ -158,9 +176,15 @@ repositories:
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.message, "failed to create auditor terminal");
+  assert.match(result.message, /missing dispatchId/);
   const verified = new Ledger(ledgerPath);
   assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(
+    verified.getJob("job-audit")?.auditor_task_id,
+    "task-audit-new",
+  );
+  assert.equal(verified.getJob("job-audit")?.auditor_dispatch_id, null);
+  assert.equal(verified.getJob("job-audit")?.dispatch_attempt, 1);
   verified.close();
 });
 

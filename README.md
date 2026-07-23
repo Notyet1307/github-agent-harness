@@ -57,7 +57,7 @@ Each cycle:
 1. Reconcile active job (same as recover)
 2. If active → resume one ensure* step (`run-once` / `audit-once` / `publish-once` / `wait-merge` poll)
 3. If none → `run-once` to claim next ready issue (if any)
-4. If **blocked** → sleep and hold the slot; only a completed audit wait with a known decision/timeout error, current result, and clean tracked tree resumes through the audit gate
+4. If **blocked** → sleep and hold the slot; completed evidence may resume finalization, while implementation redispatch requires an explicit `recover --execute`
 5. Never auto-merges — you merge on GitHub; watch records `mergedAt`
 
 ### Crash recovery (M5)
@@ -77,11 +77,14 @@ Routing (ensure*, not blind create):
 | awaiting_audit / auditing / reworking | `audit-once` (reuse only valid exact-SHA JSON from a completed same-round task) |
 | audit_passed / publishing | `publish-once` (reuse existing PR) |
 | awaiting_merge | `wait-merge` |
+| blocked after implementation commits landed late | `run-once` (verify and finalize without redispatch) |
+| blocked after an ended implementation with no commits | explicit `recover --execute` redispatches the same issue in the existing worktree |
 | blocked after eligible audit wait | `audit-once` (evaluate the existing result through the normal gate) |
 | other blocked | nothing — hold the slot |
 | merged / no active job | nothing — safe to pick next |
 
 Recovery never accepts an audit result directly; eligible interrupted audits re-enter `audit-once` so strict structure, exact full-SHA, same-round task provenance, cleanliness, validation, and finding gates still run.
+Implementation retries require a readable worktree still at the pinned base, clear stale task/dispatch provenance, and preserve tracked changes. A failed retry remains blocked; `watch` never triggers another retry automatically.
 
 Do not finalize an audit by editing the ledger or evaluating
 `.harness/audit-result.json` from an ad-hoc script. `recover --execute` and
@@ -98,6 +101,10 @@ Before dispatch, harness requires `tui-idle`. After every `orchestration dispatc
 - TUI leaving idle
 
 Confirmed silent-idle or provider/model startup failures **fail the old task, recreate the agent terminal once, and re-dispatch**. Interactive gates and unavailable/ambiguous probes are not retried automatically; their dispatch provenance stays in the ledger so `recover` can resume safely. Used by implement, audit, and rework paths.
+
+Completion messages are accepted only after parsing the Orca payload and matching the current task id plus the dispatch id when one was recorded. New dispatches without an id fail closed; stale, malformed, or provenance-free `worker_done` messages are ignored.
+
+Implementation and rework prompts also isolate internal review subagents from Orca lifecycle credentials. Only the parent implementer may send `worker_done`.
 
 Config: `config/harness.yaml`.
 

@@ -129,3 +129,12 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Provider/model startup failure | Treat like confirmed silent failure | Infrastructure failure is retryable, not a code failure |
 | Interactive or unknown probe | Preserve provenance; do not auto retry | Avoid duplicate work while human action or probe recovery may unblock it |
 | Max attempts | 2 | Avoid infinite loops |
+
+## 2026-07-23 — worker completion provenance
+
+| Decision | Choice | Why |
+|---|---|---|
+| Completion matching | Parse string/object payloads, require the current task id plus the recorded dispatch id, and reject new dispatches with no id | Persistent controller inboxes can contain stale messages; missing provenance is not proof of completion |
+| Internal review subagents | No inherited Orca context; reports return only to the parent implementer | A reviewer must not be able to complete its parent's lifecycle task |
+| Late implementation commit | Verify and finalize the existing commits without redispatch | Completion can race with the final commit; Git/worktree evidence is authoritative |
+| No-commit completion recovery | Require readable HEAD at the pinned base; preserve the worktree and redispatch only via explicit `recover --execute` | Keep partial changes without letting failed retries or `watch` create retry loops |
