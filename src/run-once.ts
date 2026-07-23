@@ -11,6 +11,7 @@ import {
   ensureBranch,
   isPushed,
   logOnelineSince,
+  refreshBaseRef,
   revParse,
   statusPorcelain,
 } from "./git.js";
@@ -153,6 +154,15 @@ function runOnceLocked(
 
     let claimed: Job | null = null;
     for (const r of repos) {
+      const refreshed = refreshBaseRef(r.localPath, r.baseRef);
+      if (!refreshed.ok) {
+        return {
+          ok: false,
+          message: `base refresh failed for ${r.github}: ${refreshed.error}`,
+        };
+      }
+      log(`refreshed ${r.github} ${r.baseRef}=${refreshed.sha}`);
+
       const pick = pickForRepo(config, r, {
         ledgerIssueNumbers: ledger.ledgerIssueNumbers(r.github),
         hasActiveJob: false,
@@ -176,7 +186,9 @@ function runOnceLocked(
       if (!result.ok) {
         return { ok: false, message: `claim failed: ${result.error}` };
       }
-      claimed = result.job;
+      claimed = ledger.updateJob(result.job.id, {
+        base_sha: refreshed.sha,
+      });
       repo = r;
       log(
         `claimed ${r.github}#${pick.selected.number} ${pick.selected.title} as ${id}`,
@@ -192,6 +204,39 @@ function runOnceLocked(
 
   if (!repo) {
     return { ok: false, message: "internal: repo missing" };
+  }
+
+  const hasWorktreeId = job.worktree_id !== null;
+  const hasWorktreePath = job.worktree_path !== null;
+  if (hasWorktreeId !== hasWorktreePath) {
+    const error =
+      "incomplete worktree provenance: worktree_id and worktree_path must both be present";
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+    });
+    return { ok: false, jobId: job.id, message: error };
+  }
+  const needsWorktree = !hasWorktreeId;
+
+  if (needsWorktree && !job.base_sha) {
+    const refreshed = refreshBaseRef(repo.localPath, repo.baseRef);
+    if (!refreshed.ok) {
+      job = ledger.updateJob(job.id, {
+        state: "claimed",
+        last_error: refreshed.error,
+      });
+      return {
+        ok: false,
+        jobId: job.id,
+        message: `base refresh failed for ${repo.github}: ${refreshed.error}`,
+      };
+    }
+    log(`refreshed ${repo.github} ${repo.baseRef}=${refreshed.sha}`);
+    job = ledger.updateJob(job.id, {
+      base_sha: refreshed.sha,
+      last_error: null,
+    });
   }
 
   // 2) Controller terminal
@@ -213,7 +258,7 @@ function runOnceLocked(
   log(`controller terminal: ${controller.handle}`);
 
   // 3) Worktree
-  if (!job.worktree_id || !job.worktree_path) {
+  if (needsWorktree) {
     log(`creating worktree for #${job.issue_number} via profile ${implementer.id}`);
     const wt = ensureIssueWorktree(
       orcaCli,
@@ -229,8 +274,8 @@ function runOnceLocked(
       return { ok: false, jobId: job.id, message: wt.error };
     }
 
-    const baseSha = revParse(wt.value.worktreePath, "HEAD");
-    if (!baseSha) {
+    const actualBaseSha = revParse(wt.value.worktreePath, "HEAD");
+    if (!actualBaseSha) {
       job = ledger.updateJob(job.id, {
         state: "blocked",
         last_error: "failed to read base SHA",
@@ -239,6 +284,24 @@ function runOnceLocked(
       });
       return { ok: false, jobId: job.id, message: "failed to read base SHA" };
     }
+    const expectedBaseSha = job.base_sha;
+    if (!expectedBaseSha || actualBaseSha !== expectedBaseSha) {
+      const error = `worktree base SHA mismatch: expected ${expectedBaseSha ?? "(missing)"} from ${repo.baseRef}, got ${actualBaseSha}`;
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: error,
+        worktree_id: wt.value.worktreeId,
+        worktree_path: wt.value.worktreePath,
+        implementer_terminal_handle: wt.value.agentTerminalHandle,
+      });
+      return {
+        ok: false,
+        jobId: job.id,
+        message: error,
+        details: { expectedBaseSha, actualBaseSha },
+      };
+    }
+    const baseSha = expectedBaseSha;
 
     const desiredBranch = `agent/issue-${job.issue_number}`;
     const branchResult = ensureBranch(wt.value.worktreePath, desiredBranch);

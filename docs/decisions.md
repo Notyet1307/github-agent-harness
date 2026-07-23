@@ -76,6 +76,15 @@ When implementing later:
 
 Do **not** hardcode Codex/Pi in transition logic.
 
+## 2026-07-23 — claim base freshness
+
+| Decision | Choice | Why |
+|---|---|---|
+| Base refresh | Fetch the configured remote-tracking `baseRef` before GitHub selection | A locally stale `origin/main` must not seed a new job |
+| Fixed point | Store the refreshed full SHA at claim and compare the created worktree HEAD exactly | Detect an Orca/ref race before agent dispatch |
+| Refresh failure | Fail closed without claiming; a resumed pre-worktree job remains claimed and retryable | Network/ref failures are infrastructure failures, not code work |
+| Audit finalization | Only `recover` / `audit-once`; remove the ad-hoc ledger finalizer | Preserve same-round task provenance and the normal audit gate |
+
 ## 2026-07-22 — M4 publish
 
 | Decision | Choice | Why |

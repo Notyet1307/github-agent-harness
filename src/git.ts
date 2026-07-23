@@ -19,6 +19,56 @@ export function currentBranch(cwd: string): string | null {
   return r.ok && r.stdout ? r.stdout : null;
 }
 
+export function refreshBaseRef(
+  cwd: string,
+  baseRef: string,
+):
+  | { ok: true; sha: string }
+  | { ok: false; error: string } {
+  const separator = baseRef.indexOf("/");
+  if (separator <= 0) {
+    return {
+      ok: false,
+      error: `baseRef must be a remote-tracking ref: ${baseRef}`,
+    };
+  }
+  const remote = baseRef.slice(0, separator);
+  const branch = baseRef.slice(separator + 1);
+  const remotes = git(cwd, ["remote"]);
+  if (
+    !remotes.ok ||
+    !remotes.stdout.split("\n").includes(remote)
+  ) {
+    return { ok: false, error: `baseRef remote not found: ${remote}` };
+  }
+
+  const fetched = execFile("git", [
+    "-C",
+    cwd,
+    "fetch",
+    "--prune",
+    remote,
+    `+refs/heads/${branch}:refs/remotes/${baseRef}`,
+  ]);
+  if (!fetched.ok) {
+    return {
+      ok: false,
+      error: `failed to refresh ${baseRef}: ${
+        fetched.stderr.trim() || fetched.error || `exit ${fetched.code}`
+      }`,
+    };
+  }
+
+  const sha = revParse(cwd, `refs/remotes/${baseRef}^{commit}`);
+  if (!sha || !/^[0-9a-f]{40}$/i.test(sha)) {
+    return {
+      ok: false,
+      error: `cannot resolve refreshed baseRef ${baseRef}`,
+    };
+  }
+  return { ok: true, sha };
+}
+
 export function ensureBranch(cwd: string, branch: string): {
   ok: boolean;
   branch: string;

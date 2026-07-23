@@ -38,6 +38,11 @@ pnpm harness status
 pnpm test
 ```
 
+Before a new claim, `run-once` refreshes the configured remote-tracking
+`baseRef`, stores its full SHA in the ledger, and requires the Orca-created
+worktree HEAD to match exactly. Fetch or SHA mismatches fail closed before
+dispatch.
+
 ### Watch (M6)
 
 ```bash
@@ -77,6 +82,10 @@ Routing (ensure*, not blind create):
 | merged / no active job | nothing — safe to pick next |
 
 Recovery never accepts an audit result directly; eligible interrupted audits re-enter `audit-once` so strict structure, exact full-SHA, same-round task provenance, cleanliness, validation, and finding gates still run.
+
+Do not finalize an audit by editing the ledger or evaluating
+`.harness/audit-result.json` from an ad-hoc script. `recover --execute` and
+`audit-once` are the only supported audit-finalization paths.
 
 Invariants: no double claim, no double worktree, no double PR, no skip audit, no next issue until merged.
 
