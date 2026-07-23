@@ -436,36 +436,47 @@ function runOnceLocked(
     log(`reusing worktree ${job.worktree_path}`);
   }
 
-  // Refresh implementer terminal handle if missing
-  if (!job.implementer_terminal_handle && job.worktree_id) {
-    const handle = ensureAgentTerminal(
-      orcaCli,
-      job.worktree_id,
-      implementer,
-      `issue-${job.issue_number}-${implementer.orcaAgent}`,
-    );
-    if (handle) {
+  const needsImplementerDispatch =
+    !job.implementer_task_id || job.dispatch_probe_pending === 1;
+  let liveImplementerHandle = job.implementer_terminal_handle;
+
+  // Orca terminal handles are not durable across restarts. Resolve a live
+  // terminal immediately before a new or pending dispatch.
+  if (needsImplementerDispatch) {
+    liveImplementerHandle = job.worktree_id
+      ? ensureAgentTerminal(
+          orcaCli,
+          job.worktree_id,
+          implementer,
+          `issue-${job.issue_number}-${implementer.orcaAgent}`,
+        )
+      : null;
+    if (
+      liveImplementerHandle &&
+      liveImplementerHandle !== job.implementer_terminal_handle
+    ) {
       job = ledger.updateJob(job.id, {
-        implementer_terminal_handle: handle,
+        implementer_terminal_handle: liveImplementerHandle,
       });
     }
   }
 
-  if (!job.implementer_terminal_handle) {
-    job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: "no implementer terminal handle",
-    });
-    return {
-      ok: false,
-      jobId: job.id,
-      message: "no implementer terminal handle (is codex/pi installed in Orca?)",
-    };
-  }
-
   // 4) Create/dispatch and confirm that the agent accepted the task.
   // If the controller crashed during the probe window, resume that task first.
-  if (!job.implementer_task_id || job.dispatch_probe_pending === 1) {
+  if (needsImplementerDispatch) {
+    const dispatchHandle = liveImplementerHandle;
+    if (!dispatchHandle) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: "no implementer terminal handle",
+      });
+      return {
+        ok: false,
+        jobId: job.id,
+        message:
+          "no implementer terminal handle (is codex/pi installed in Orca?)",
+      };
+    }
     if (!job.base_sha || !job.branch || !job.worktree_path) {
       return {
         ok: false,
@@ -494,7 +505,7 @@ function runOnceLocked(
         ? {
             taskId: job.implementer_task_id,
             dispatchId: job.implementer_dispatch_id,
-            to: job.implementer_terminal_handle,
+            to: dispatchHandle,
             attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
           }
         : undefined;
@@ -502,7 +513,7 @@ function runOnceLocked(
       title: `Implement ${repo.github}#${job.issue_number}`,
       displayName: `issue-${job.issue_number}-implement`,
       spec,
-      to: job.implementer_terminal_handle,
+      to: dispatchHandle,
       from: job.controller_terminal_handle!,
       onLog: log,
       existingDispatch,
@@ -519,13 +530,19 @@ function runOnceLocked(
       },
       recreateAgentTerminal: () => {
         if (!worktreeId) return null;
-        return ensureAgentTerminal(
+        const replacement = ensureAgentTerminal(
           orcaCli,
           worktreeId,
           implementer,
           `issue-${issueNumber}-${implementer.orcaAgent}`,
           { forceNew: true },
         );
+        if (replacement) {
+          job = ledger.updateJob(jobId, {
+            implementer_terminal_handle: replacement,
+          });
+        }
+        return replacement;
       },
     });
     if (!ensured.ok) {

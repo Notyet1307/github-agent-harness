@@ -36,7 +36,11 @@ type AuditFixtureMode =
   | "rework-diverge"
   | "rework-dirty"
   | "rework-commit"
-  | "rework-retry-drift";
+  | "rework-escalated-commit"
+  | "rework-late-commit"
+  | "rework-resume-commit"
+  | "rework-retry-drift"
+  | "rework-stale-terminal";
 
 test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
   const fixture = createAuditFixture((baseSha, headSha) =>
@@ -307,6 +311,144 @@ test("resumes a pending rework dispatch after its worker committed", (t) => {
   );
 });
 
+test("resumes a committed rework when worker_done was lost", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-resume-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+  writeFileSync(join(fixture.worktree, "value.txt"), "recovered fix\n");
+  git(fixture.worktree, "add", "value.txt");
+  git(fixture.worktree, "commit", "-m", "recovered fix");
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 2);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
+test("reports invalid rework evidence when worker_done is also lost", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-resume-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /no commits after audited HEAD/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.match(
+    verified.getJob("job-audit")?.last_error ?? "",
+    /no commits after audited HEAD/,
+  );
+  verified.close();
+});
+
+test("recovers a rework commit that lands while worker_done times out", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-late-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 2);
+  verified.close();
+});
+
+test("does not recover a committed rework after worker escalation", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-escalated-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /worker sent escalation/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  verified.close();
+});
+
+test("rebinds a stale implementer terminal before rework dispatch", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-stale-terminal",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture, false);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(
+    verified.getJob("job-audit")?.implementer_terminal_handle,
+    "implementer-new",
+  );
+  verified.close();
+  const dispatches = readCalls(fixture.callsPath).filter(
+    (args) => args[0] === "orchestration" && args[1] === "dispatch",
+  );
+  assert.equal(
+    dispatches.some((args) => args.includes("implementer-1")),
+    false,
+  );
+  assert.equal(
+    dispatches.some((args) => args.includes("implementer-new")),
+    true,
+  );
+});
+
 test("rework retry rechecks the audited HEAD before creating another task", (t) => {
   const fixture = createAuditFixture(
     actionableAuditFailure,
@@ -485,7 +627,7 @@ function createAuditFixture(
   writeFileSync(join(dir, "mode"), mode);
   writeFileSync(
     join(dir, "state.json"),
-    JSON.stringify({ checks: 0, tasks: 0, drifted: false }),
+    JSON.stringify({ checks: 0, tasks: 0, mutationApplied: false }),
   );
   const fakeOrca = join(dir, "orca.cjs");
   writeFileSync(
@@ -509,17 +651,32 @@ if (args[0] === "status") {
   } }));
 } else if (key === "terminal list") {
   console.log(JSON.stringify({ ok: true, result: {
-    terminals: [{ handle: "controller-1", title: "test-controller", connected: true }]
+    terminals:
+      mode === "rework-stale-terminal" && args.includes("id:worktree-1")
+        ? []
+        : [{ handle: "controller-1", title: "test-controller", connected: true }]
   } }));
 } else if (key === "terminal create") {
-  console.log(JSON.stringify({ ok: true, result: { handle: "pi-new" } }));
-} else if (key === "terminal wait") {
-  console.log(JSON.stringify({ ok: true, result: {
-    wait: { satisfied: true, status: "idle", blockedReason: null }
+  const title = args[args.indexOf("--title") + 1] || "";
+  console.log(JSON.stringify({ ok: true, result: { handle:
+    mode === "rework-stale-terminal"
+      ? title.includes("audit") ? "auditor-new" : "implementer-new"
+      : "pi-new"
   } }));
+} else if (key === "terminal wait") {
+  if (mode === "rework-stale-terminal" && args.includes("implementer-1")) {
+    console.log(JSON.stringify({ ok: false, error: {
+      message: "terminal implementer-1 not found"
+    } }));
+    process.exitCode = 1;
+  } else {
+    console.log(JSON.stringify({ ok: true, result: {
+      wait: { satisfied: true, status: "idle", blockedReason: null }
+    } }));
+  }
 } else if (key === "terminal read") {
   const fresh = args.includes("--cursor");
-  if (mode === "rework-retry-drift" && fresh && !state.drifted) {
+  if (mode === "rework-retry-drift" && fresh && !state.mutationApplied) {
     writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "retry drift\\n");
     execFileSync(
       "git",
@@ -529,12 +686,18 @@ if (args[0] === "status") {
       "git",
       ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "retry drift"]
     );
-    state.drifted = true;
+    state.mutationApplied = true;
     writeFileSync(statePath, JSON.stringify(state));
   }
   console.log(JSON.stringify({ ok: true, result: { terminal: {
     tail:
-      mode === "rework-retry-drift" && fresh
+      mode === "rework-stale-terminal"
+        ? state.tasks === 0
+          ? []
+          : [state.tasks === 1
+            ? "Working on task-rework-new"
+            : "Working on task-audit-new"]
+        : mode === "rework-retry-drift" && fresh
         ? ["Provider unavailable: model error"]
         : reworkMode
           ? ["Working on task-rework"]
@@ -554,12 +717,19 @@ if (args[0] === "status") {
   state.tasks += 1;
   writeFileSync(statePath, JSON.stringify(state));
   console.log(JSON.stringify({ ok: true, result: {
-    taskId: mode === "rework-retry-drift"
-      ? "task-rework-" + state.tasks
-      : "task-audit-new"
+    taskId:
+      mode === "rework-stale-terminal"
+        ? state.tasks === 1 ? "task-rework-new" : "task-audit-new"
+        : mode === "rework-retry-drift"
+          ? "task-rework-" + state.tasks
+          : "task-audit-new"
   } }));
 } else if (key === "orchestration dispatch") {
-  if (mode === "rework-retry-drift") {
+  if (mode === "rework-stale-terminal" && state.tasks === 1) {
+    console.log(JSON.stringify({ ok: true, result: {
+      dispatchId: "dispatch-rework-new"
+    } }));
+  } else if (mode === "rework-retry-drift") {
     console.log(JSON.stringify({ ok: true, result:
       state.tasks === 1 ? { dispatchId: "dispatch-rework-1" } : {}
     }));
@@ -607,6 +777,90 @@ if (args[0] === "status") {
 } else if (key === "orchestration check" && reworkMode) {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));
+  if (mode === "rework-escalated-commit") {
+    if (state.tasks > 0) {
+      console.log(JSON.stringify({ ok: true, result: { messages: [{
+        type: "worker_done",
+        taskId: "task-audit-new",
+        dispatchId: "dispatch-audit-new"
+      }] } }));
+      process.exit(0);
+    }
+    if (!state.mutationApplied) {
+      writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "escalated fix\\n");
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]
+      );
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "escalated fix"]
+      );
+      state.mutationApplied = true;
+      writeFileSync(statePath, JSON.stringify(state));
+    }
+    console.log(JSON.stringify({ ok: true, result: { messages: [{
+      type: "escalation",
+      taskId: "task-rework",
+      dispatchId: "dispatch-rework"
+    }] } }));
+    process.exit(0);
+  }
+  if (mode === "rework-stale-terminal") {
+    if (state.tasks === 1 && !state.mutationApplied) {
+      writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "rebound fix\\n");
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]
+      );
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "rebound fix"]
+      );
+      state.mutationApplied = true;
+      writeFileSync(statePath, JSON.stringify(state));
+    }
+    console.log(JSON.stringify({ ok: true, result: { messages: [{
+      type: "worker_done",
+      taskId: state.tasks === 1 ? "task-rework-new" : "task-audit-new",
+      dispatchId:
+        state.tasks === 1 ? "dispatch-rework-new" : "dispatch-audit-new"
+    }] } }));
+    process.exit(0);
+  }
+  if (mode === "rework-late-commit") {
+    if (state.tasks === 0 && !state.mutationApplied) {
+      writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "late fix\\n");
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]
+      );
+      execFileSync(
+        "git",
+        ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "late fix"]
+      );
+      state.mutationApplied = true;
+      writeFileSync(statePath, JSON.stringify(state));
+    }
+    console.log(JSON.stringify({ ok: true, result: { messages:
+      state.tasks === 0 ? [] : [{
+        type: "worker_done",
+        taskId: "task-audit-new",
+        dispatchId: "dispatch-audit-new"
+      }]
+    } }));
+    process.exit(0);
+  }
+  if (mode === "rework-resume-commit") {
+    console.log(JSON.stringify({ ok: true, result: { messages:
+      state.tasks === 0 ? [] : [{
+        type: "worker_done",
+        taskId: "task-audit-new",
+        dispatchId: "dispatch-audit-new"
+      }]
+    } }));
+    process.exit(0);
+  }
   const first = state.checks === 1;
   if (first && mode === "rework-diverge") {
     const tree = execFileSync(
@@ -667,6 +921,13 @@ if (args[0] === "status") {
     `version: 1
 issueLabel: ready-for-agent
 maxAuditRounds: 3
+implementTimeoutMinutes: ${
+      mode === "rework-resume-commit"
+        ? 0
+        : mode === "rework-late-commit"
+          ? 0.001
+          : 45
+    }
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}

@@ -670,6 +670,107 @@ function runReworkPhase(
   if (!auditHeadSha) {
     return blockRework("rework missing audited HEAD");
   }
+  const inspectReworkCompletion = ():
+    | { ok: true; headSha: string; commits: number }
+    | { ok: false; error: string } => {
+    const headSha = revParse(worktreePath, "HEAD");
+    if (!headSha) {
+      return { ok: false, error: "cannot read rework HEAD" };
+    }
+    if (headSha === auditHeadSha) {
+      return {
+        ok: false,
+        error: "rework produced no commits after audited HEAD",
+      };
+    }
+    const ancestry = git(worktreePath, [
+      "merge-base",
+      "--is-ancestor",
+      auditHeadSha,
+      headSha,
+    ]);
+    if (!ancestry.ok && ancestry.stderr) {
+      return {
+        ok: false,
+        error: `cannot verify rework ancestry: ${ancestry.stderr}`,
+      };
+    }
+    if (!ancestry.ok) {
+      return {
+        ok: false,
+        error: "rework HEAD is not a descendant of audited HEAD",
+      };
+    }
+    const count = git(worktreePath, [
+      "rev-list",
+      "--count",
+      `${auditHeadSha}..${headSha}`,
+    ]);
+    if (!count.ok) {
+      return {
+        ok: false,
+        error:
+          `cannot count rework commits: ` +
+          `${count.stderr || "unknown Git error"}`,
+      };
+    }
+    const commits = Number(count.stdout);
+    if (!Number.isSafeInteger(commits)) {
+      return {
+        ok: false,
+        error: `invalid rework commit count: ${count.stdout}`,
+      };
+    }
+    if (commits < 1) {
+      return {
+        ok: false,
+        error: "rework produced zero commits after audited HEAD",
+      };
+    }
+    const dirty = trackedDirty(worktreePath);
+    if (dirty) {
+      return {
+        ok: false,
+        error: `tracked files dirty after rework:\n${dirty}`,
+      };
+    }
+    return { ok: true, headSha, commits };
+  };
+  const finishRework = (
+    completion: { headSha: string; commits: number },
+  ): AuditOnceResult => {
+    job = ledger.updateJob(job.id, {
+      state: "awaiting_audit",
+      head_sha: completion.headSha,
+      last_error: null,
+      // force new audit task next
+      auditor_task_id: null,
+      auditor_dispatch_id: null,
+      auditor_terminal_handle: null,
+      dispatch_attempt: 0,
+      dispatch_probe_pending: 0,
+    });
+    log(
+      `rework done head=${completion.headSha.slice(0, 7)} ` +
+      `commits_since_audit=${completion.commits}`,
+    );
+    return {
+      ok: true,
+      jobId: job.id,
+      message: "rework complete; ready for re-audit",
+      details: completion,
+    };
+  };
+  if (job.implementer_task_id) {
+    const recovered = inspectReworkCompletion();
+    if (recovered.ok) {
+      log(
+        "M5 resume: committed rework already present; " +
+        "skipping worker_done wait",
+      );
+      return finishRework(recovered);
+    }
+  }
   const dispatchFixedPointError = (): string | null => {
     const reworkStartHead = revParse(worktreePath, "HEAD");
     if (reworkStartHead !== auditHeadSha) {
@@ -689,25 +790,31 @@ function runReworkPhase(
     if (fixedPointError) return blockRework(fixedPointError);
   }
 
-  // Prefer existing implementer terminal; else create
+  const needsDispatch =
+    !job.implementer_task_id || job.dispatch_probe_pending === 1;
   let handle = job.implementer_terminal_handle;
-  if (!handle) {
+  if (needsDispatch) {
     handle = ensureAgentTerminal(
       orcaCli,
       worktreeId,
       implementer,
       `issue-${job.issue_number}-${implementer.orcaAgent}`,
     );
+    if (handle && handle !== job.implementer_terminal_handle) {
+      job = ledger.updateJob(job.id, {
+        implementer_terminal_handle: handle,
+      });
+    }
   }
-  if (!handle) {
-    return {
-      ok: false,
-      jobId: job.id,
-      message: "no implementer terminal for rework",
-    };
-  }
-
-  if (!job.implementer_task_id || job.dispatch_probe_pending === 1) {
+  if (needsDispatch) {
+    if (!handle) {
+      return {
+        ok: false,
+        jobId: job.id,
+        message: "no implementer terminal for rework",
+      };
+    }
+    const dispatchHandle = handle;
     const auditJson = job.audit_result_json ?? "{}";
     const spec = renderReworkSpec({
       repo: repo.github,
@@ -728,7 +835,7 @@ function runReworkPhase(
         ? {
             taskId: job.implementer_task_id,
             dispatchId: job.implementer_dispatch_id,
-            to: handle,
+            to: dispatchHandle,
             attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
           }
         : undefined;
@@ -737,7 +844,7 @@ function runReworkPhase(
       title: `Rework ${repo.github}#${job.issue_number} after audit r${job.audit_round}`,
       displayName: `issue-${job.issue_number}-rework-r${job.audit_round}`,
       spec,
-      to: handle,
+      to: dispatchHandle,
       from: job.controller_terminal_handle!,
       onLog: log,
       existingDispatch,
@@ -756,14 +863,21 @@ function runReworkPhase(
           last_error: null,
         });
       },
-      recreateAgentTerminal: () =>
-        ensureAgentTerminal(
+      recreateAgentTerminal: () => {
+        const replacement = ensureAgentTerminal(
           orcaCli,
           worktreeId,
           implementer,
           `issue-${issueNumber}-${implementer.orcaAgent}`,
           { forceNew: true },
-        ),
+        );
+        if (replacement) {
+          job = ledger.updateJob(jobId, {
+            implementer_terminal_handle: replacement,
+          });
+        }
+        return replacement;
+      },
     });
     if (!ensured.ok) {
       const hasLastTask = ensured.lastTaskId !== undefined;
@@ -826,75 +940,22 @@ function runReworkPhase(
     onTick: (info) => log(info),
   });
   if (!done.ok) {
-    job = ledger.updateJob(job.id, {
-      state: "blocked",
-      last_error: done.error,
-    });
-    return { ok: false, jobId: job.id, message: done.error };
+    if (done.escalated) {
+      return blockRework(done.error);
+    }
+    const recovered = inspectReworkCompletion();
+    if (recovered.ok) {
+      log(
+        "worker_done missing but committed rework exists; " +
+        "continuing re-audit (M5)",
+      );
+      return finishRework(recovered);
+    }
+    return blockRework(`${done.error}; ${recovered.error}`);
   }
 
-  const headSha = revParse(worktreePath, "HEAD");
-  if (!headSha) {
-    return blockRework("cannot read rework HEAD");
-  }
-  if (headSha === auditHeadSha) {
-    return blockRework("rework produced no commits after audited HEAD");
-  }
-  const ancestry = git(worktreePath, [
-    "merge-base",
-    "--is-ancestor",
-    auditHeadSha,
-    headSha,
-  ]);
-  if (!ancestry.ok && ancestry.stderr) {
-    return blockRework(
-      `cannot verify rework ancestry: ${ancestry.stderr}`,
-    );
-  }
-  if (!ancestry.ok) {
-    return blockRework(
-      "rework HEAD is not a descendant of audited HEAD",
-    );
-  }
-  const count = git(worktreePath, [
-    "rev-list",
-    "--count",
-    `${auditHeadSha}..${headSha}`,
-  ]);
-  if (!count.ok) {
-    return blockRework(
-      `cannot count rework commits: ${count.stderr || "unknown Git error"}`,
-    );
-  }
-  const commits = Number(count.stdout);
-  if (!Number.isSafeInteger(commits)) {
-    return blockRework(`invalid rework commit count: ${count.stdout}`);
-  }
-  if (commits < 1) {
-    return blockRework("rework produced zero commits after audited HEAD");
-  }
-  const dirtyAfterRework = trackedDirty(worktreePath);
-  if (dirtyAfterRework) {
-    const error = `tracked files dirty after rework:\n${dirtyAfterRework}`;
-    return blockRework(error);
-  }
-
-  job = ledger.updateJob(job.id, {
-    state: "awaiting_audit",
-    head_sha: headSha,
-    last_error: null,
-    // force new audit task next
-    auditor_task_id: null,
-    auditor_dispatch_id: null,
-    auditor_terminal_handle: null,
-    dispatch_attempt: 0,
-    dispatch_probe_pending: 0,
-  });
-  log(`rework done head=${headSha.slice(0, 7)} commits_since_audit=${commits}`);
-  return {
-    ok: true,
-    jobId: job.id,
-    message: "rework complete; ready for re-audit",
-    details: { headSha, commits },
-  };
+  const completion = inspectReworkCompletion();
+  return completion.ok
+    ? finishRework(completion)
+    : blockRework(completion.error);
 }

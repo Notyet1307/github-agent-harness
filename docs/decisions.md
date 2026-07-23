@@ -170,4 +170,6 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Completion matching | Parse string/object payloads, require the current task id plus the recorded dispatch id, and reject new dispatches with no id | Persistent controller inboxes can contain stale messages; missing provenance is not proof of completion |
 | Internal review subagents | No inherited Orca context; reports return only to the parent implementer | A reviewer must not be able to complete its parent's lifecycle task |
 | Late implementation commit | Verify and finalize the existing commits without redispatch | Completion can race with the final commit; Git/worktree evidence is authoritative |
+| Late rework commit | Verify a clean descendant of the exact audited HEAD and re-audit without redispatch | Rework commits can survive a lost `worker_done`; stale or divergent Git state still blocks |
+| Implementer terminal recovery | Re-resolve a connected terminal before each new or pending implementation/rework dispatch | Orca restarts can invalidate a non-empty stored handle |
 | No-commit completion recovery | Require readable HEAD at the pinned base; preserve the worktree and redispatch only via explicit `recover --execute` | Keep partial changes without letting failed retries or `watch` create retry loops |
