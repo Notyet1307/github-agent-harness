@@ -45,7 +45,7 @@ Implementer/auditor are **roles**. Codex vs Pi(+provider/extensions) are **profi
 | Pi subagent source | User global `npm:pi-subagents` (`nicobailon/pi-subagents`) | Supports explicit user-scope discovery and child resource policy |
 | Auditor resources | Controller-owned launcher, skill, and `harness-reviewer` | Project agents/settings cannot redefine the independent reviewer |
 | Auditor model | Inherit the active parent Pi provider/model | Child receives the resolved parent model; pin in the launcher only if a gateway requires it |
-| Gate input | `.harness/audit-result.json` schema | Natural-language worker_done is not machine-safe |
+| Gate input | Runtime-validated `.harness/audit-result.json` with full exact SHAs and validation evidence | Natural-language worker_done and TypeScript casts are not machine-safe |
 | Smells | Non-blocking alone | Matches Matt dual-axis semantics |
 | M3 stop state | `audit_passed` | No PR until M4 |
 
@@ -93,7 +93,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Entry command | `harness recover` dry-run default, `--execute` to act | Safe after crash |
 | Routing | Pure `reconcileJob` → ensure* command | Testable without Orca |
 | Codex done / ledger stale | Commits since base ⇒ finalize without worker_done | Crash after implement |
-| Pi done / ledger stale | Reuse `.harness/audit-result.json` if HEAD matches | Crash after audit write |
+| Pi done / ledger stale | Reuse only a valid result for the exact base/HEAD when the same-round auditor task is completed | Crash recovery without accepting stale files |
 | Blocked audit wait | Known decision/timeout error + auditor task completed + current result + tracked clean ⇒ re-enter audit gate | Recover late evidence without accepting it directly |
 | PR create | Always find-by-head before create | No duplicate PR |
 | Worktree | Reuse by issue linkage / path | No duplicate worktree |

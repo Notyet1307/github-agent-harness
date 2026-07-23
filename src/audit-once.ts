@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   defaultLedgerPath,
@@ -8,6 +8,7 @@ import {
   loadConfig,
 } from "./config.js";
 import {
+  auditResultMatchesShas,
   evaluateAuditGate,
   loadAuditResult,
   trackedDirty,
@@ -25,6 +26,7 @@ import {
   dispatchTaskEnsured,
   ensureAgentTerminal,
   ensureControllerTerminal,
+  orchestrationTaskStatus,
   setWorktreeProgress,
   waitWorkerDone,
 } from "./orca-runtime.js";
@@ -278,22 +280,68 @@ function runAuditPhase(
 
   // Snapshot tracked cleanliness before audit
   const dirtyBefore = trackedDirty(worktreePath);
+  if (dirtyBefore) {
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: `tracked files dirty before audit:\n${dirtyBefore}`,
+    });
+    return {
+      ok: false,
+      jobId: job.id,
+      message: "tracked files dirty before audit",
+      details: { dirtyBefore },
+    };
+  }
 
-  // M5: if result already written for this HEAD, skip re-dispatch
+  // Resume only evidence tied to this job's current audit task and round.
   const existing = loadAuditResult(resultPath);
+  const sameRoundTask =
+    job.state === "auditing" &&
+    job.audit_round === round &&
+    job.audit_head_sha === headSha &&
+    Boolean(job.auditor_task_id);
+  const completedSameRoundTask =
+    sameRoundTask &&
+    orchestrationTaskStatus(
+      orcaCli,
+      job.auditor_task_id!,
+    )?.toLowerCase() === "completed";
   const canReuseResult =
+    completedSameRoundTask &&
     existing.ok &&
-    existing.result &&
-    (existing.result.head_sha === headSha ||
-      headSha.startsWith(existing.result.head_sha) ||
-      existing.result.head_sha.startsWith(headSha));
+    Boolean(
+      existing.result &&
+        auditResultMatchesShas(existing.result, baseSha, headSha),
+    );
+
+  if (completedSameRoundTask && !canReuseResult) {
+    const error =
+      existing.error ??
+      "completed audit task produced a result for different base/head SHAs";
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+    });
+    return { ok: false, jobId: job.id, message: error };
+  }
 
   if (!canReuseResult) {
     const title = `issue-${job.issue_number}-audit-r${round}`;
     const resumingRound =
-      job.state === "auditing" &&
-      job.audit_round === round &&
+      sameRoundTask &&
       Boolean(job.auditor_terminal_handle);
+    if (!sameRoundTask) {
+      try {
+        rmSync(resultPath, { force: true });
+      } catch (err) {
+        const error = `failed to clear stale audit result: ${(err as Error).message}`;
+        job = ledger.updateJob(job.id, {
+          state: "blocked",
+          last_error: error,
+        });
+        return { ok: false, jobId: job.id, message: error };
+      }
+    }
     let handle = resumingRound ? job.auditor_terminal_handle : null;
     if (!handle) {
       log(`creating auditor terminal ${title}`);
@@ -423,21 +471,38 @@ function runAuditPhase(
       onTick: (info) => log(info),
     });
     if (!done.ok) {
-      // M5: result file may still have been written
+      // worker_done may be lost; completed task provenance is the fallback.
       const late = loadAuditResult(resultPath);
-      if (!(late.ok && late.result)) {
+      const completed =
+        done.error.startsWith("timeout waiting for worker_done") &&
+        orchestrationTaskStatus(
+          orcaCli,
+          job.auditor_task_id!,
+        )?.toLowerCase() === "completed";
+      if (
+        !(
+          completed &&
+          late.ok &&
+          late.result &&
+          auditResultMatchesShas(late.result, baseSha, headSha)
+        )
+      ) {
         job = ledger.updateJob(job.id, {
           state: "blocked",
           last_error: done.error,
         });
         return { ok: false, jobId: job.id, message: done.error };
       }
-      log("worker_done missing but audit-result.json present; continuing (M5)");
+      log(
+        "worker_done missing but same-round task completed with a valid result; continuing",
+      );
     } else {
       log("received auditor worker_done");
     }
   } else {
-    log("M5 resume: reusing existing audit-result.json for current HEAD");
+    log(
+      "M5 resume: reusing valid audit result from the completed same-round task",
+    );
     job = ledger.updateJob(job.id, {
       state: "auditing",
       audit_round: round,
@@ -450,7 +515,7 @@ function runAuditPhase(
 
   // Cleanliness: tracked files must not change
   const dirtyAfter = trackedDirty(worktreePath);
-  if (dirtyAfter && dirtyAfter !== dirtyBefore) {
+  if (dirtyAfter) {
     job = ledger.updateJob(job.id, {
       state: "blocked",
       last_error: `auditor modified tracked files:\n${dirtyAfter}`,

@@ -19,12 +19,14 @@ export type ReconcileHints = {
   worktreeExists?: boolean;
   /** HEAD has commits since base_sha. */
   hasCommitsSinceBase?: boolean;
+  /** Current worktree HEAD SHA, when readable. */
+  currentHeadSha?: string | null;
   /** Tracked working tree clean (-uno). */
   trackedClean?: boolean;
   /** Orca orchestration task status if known. */
   implementTaskStatus?: string | null;
   auditTaskStatus?: string | null;
-  /** .harness/audit-result.json exists and matches current HEAD. */
+  /** Strict audit result exists and matches the current base and HEAD. */
   auditResultReady?: boolean;
   /** Remote open PR exists for branch. */
   prExists?: boolean;
@@ -53,6 +55,8 @@ export function reconcileJob(
     case "blocked":
       if (
         job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha === hints.currentHeadSha &&
         isRecoverableAuditWaitError(job.last_error) &&
         hints.auditResultReady === true &&
         hints.auditTaskStatus?.toLowerCase() === "completed" &&
