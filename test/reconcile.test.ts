@@ -103,6 +103,9 @@ test("blocked audit wait resumes when completed evidence is ready", () => {
     job({
       state: "blocked",
       auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
       last_error:
         "worker raised decision_gate (unsupported in M2 auto path)",
     }),
@@ -110,6 +113,7 @@ test("blocked audit wait resumes when completed evidence is ready", () => {
       auditResultReady: true,
       auditTaskStatus: "completed",
       trackedClean: true,
+      currentHeadSha: "head",
     },
   );
 
@@ -121,12 +125,16 @@ test("timed-out audit wait resumes when completed evidence is ready", () => {
     job({
       state: "blocked",
       auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
       last_error: "timeout waiting for worker_done on task task-audit",
     }),
     {
       auditResultReady: true,
       auditTaskStatus: "completed",
       trackedClean: true,
+      currentHeadSha: "head",
     },
   );
 
@@ -144,6 +152,23 @@ test("blocked audit wait stays blocked when completed evidence is incomplete", (
     {
       auditResultReady: true,
       auditTaskStatus: "running",
+      trackedClean: true,
+    },
+  );
+
+  assert.equal(a.kind, "blocked");
+});
+
+test("blocked audit wait stays blocked without same-round HEAD provenance", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      last_error: "timeout waiting for worker_done on task task-audit",
+    }),
+    {
+      auditResultReady: true,
+      auditTaskStatus: "completed",
       trackedClean: true,
     },
   );

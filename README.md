@@ -69,14 +69,14 @@ Routing (ensure*, not blind create):
 | State | Resume |
 |---|---|
 | claimed / worktree_ready / implementing | `run-once` (reuse worktree; commits skip re-wait) |
-| awaiting_audit / auditing / reworking | `audit-once` (reuse audit JSON if HEAD matches) |
+| awaiting_audit / auditing / reworking | `audit-once` (reuse only valid exact-SHA JSON from a completed same-round task) |
 | audit_passed / publishing | `publish-once` (reuse existing PR) |
 | awaiting_merge | `wait-merge` |
 | blocked after eligible audit wait | `audit-once` (evaluate the existing result through the normal gate) |
 | other blocked | nothing — hold the slot |
 | merged / no active job | nothing — safe to pick next |
 
-Recovery never accepts an audit result directly; eligible interrupted audits re-enter `audit-once` so the normal SHA, cleanliness, validation, and finding gates still run.
+Recovery never accepts an audit result directly; eligible interrupted audits re-enter `audit-once` so strict structure, exact full-SHA, same-round task provenance, cleanliness, validation, and finding gates still run.
 
 Invariants: no double claim, no double worktree, no double PR, no skip audit, no next issue until merged.
 

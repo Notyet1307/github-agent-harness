@@ -81,7 +81,7 @@ Keep the axes independent. Do not merge or re-rank their findings.
 
 ## 4. Validate and emit the gate artifact
 
-Run approved validation commands where useful. Write exactly one `.harness/audit-result.json` at the dispatched result path:
+Run approved validation commands and record at least one actual command result. If the repo exposes no validation script, use `git diff --check <fixed-point>...HEAD`. Write exactly one `.harness/audit-result.json` at the dispatched result path, using the full 40-character base and HEAD SHAs:
 
 ```json
 {
@@ -89,13 +89,13 @@ Run approved validation commands where useful. Write exactly one `.harness/audit
   "base_sha": "<fixed-point resolved sha>",
   "head_sha": "<HEAD sha>",
   "standards": {
-    "documented_standard_violations": [{ "summary": "", "detail": "", "blocking": true }],
-    "smell_judgement_calls": [{ "summary": "", "detail": "", "blocking": false }]
+    "documented_standard_violations": [],
+    "smell_judgement_calls": []
   },
   "spec": {
-    "missing_or_partial": [{ "summary": "", "detail": "", "blocking": true }],
-    "incorrect_implementation": [{ "summary": "", "detail": "", "blocking": true }],
-    "scope_creep": [{ "summary": "", "detail": "", "blocking": true }]
+    "missing_or_partial": [],
+    "incorrect_implementation": [],
+    "scope_creep": []
   },
   "validation": {
     "commands": [{ "command": "npm test", "exit_code": 0, "ok": true }]

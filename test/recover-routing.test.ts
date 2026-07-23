@@ -202,7 +202,9 @@ test("recover executes a completed blocked audit result through the gate", (t) =
         incorrect_implementation: [],
         scope_creep: [],
       },
-      validation: { commands: [] },
+      validation: {
+        commands: [{ command: "npm test", exit_code: 0, ok: true }],
+      },
     }),
   );
 

@@ -1,5 +1,9 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  auditResultMatchesShas,
+  loadAuditResult,
+} from "./audit-gate.js";
 import {
   defaultLedgerPath,
   defaultLockPath,
@@ -202,6 +206,7 @@ function gatherHints(
     hints.worktreeExists = existsSync(job.worktree_path);
     if (hints.worktreeExists && job.base_sha) {
       const head = revParse(job.worktree_path, "HEAD");
+      hints.currentHeadSha = head;
       hints.hasCommitsSinceBase =
         Boolean(head) &&
         head !== job.base_sha &&
@@ -216,19 +221,13 @@ function gatherHints(
       hints.trackedClean = tracked.ok && !tracked.stdout.trim();
 
       const resultPath = join(job.worktree_path, ".harness", "audit-result.json");
-      if (existsSync(resultPath) && head) {
-        try {
-          const raw = JSON.parse(readFileSync(resultPath, "utf8")) as {
-            head_sha?: string;
-          };
-          hints.auditResultReady =
-            Boolean(raw.head_sha) &&
-            (raw.head_sha === head ||
-              head.startsWith(raw.head_sha!) ||
-              raw.head_sha!.startsWith(head));
-        } catch {
-          hints.auditResultReady = false;
-        }
+      if (head) {
+        const loaded = loadAuditResult(resultPath);
+        hints.auditResultReady = Boolean(
+          loaded.ok &&
+            loaded.result &&
+            auditResultMatchesShas(loaded.result, job.base_sha, head),
+        );
       }
     }
   }

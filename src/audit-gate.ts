@@ -21,8 +21,12 @@ export function loadAuditResult(path: string): {
     return { ok: false, error: `audit result file missing: ${path}` };
   }
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as AuditResult;
-    return { ok: true, result: raw };
+    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    const error = auditResultError(raw);
+    if (error) {
+      return { ok: false, error: `invalid audit result: ${error}` };
+    }
+    return { ok: true, result: raw as AuditResult };
   } catch (err) {
     return {
       ok: false,
@@ -147,6 +151,17 @@ export function evaluateAuditGate(
   };
 }
 
+export function auditResultMatchesShas(
+  result: AuditResult,
+  expectedBaseSha: string,
+  expectedHeadSha: string,
+): boolean {
+  return (
+    shaMatch(result.base_sha, expectedBaseSha) &&
+    shaMatch(result.head_sha, expectedHeadSha)
+  );
+}
+
 /** Tracked working tree dirty? Untracked files (e.g. .pi, .harness) ignored. */
 export function trackedDirty(worktreePath: string): string {
   const r = execFile("git", [
@@ -156,7 +171,9 @@ export function trackedDirty(worktreePath: string): string {
     "--porcelain",
     "-uno",
   ]);
-  return r.ok ? r.stdout.trim() : r.stderr.trim();
+  return r.ok
+    ? r.stdout.trim()
+    : `git status failed: ${r.stderr.trim() || r.error || `exit ${r.code}`}`;
 }
 
 function countBlocking(findings: AuditFinding[] | undefined): number {
@@ -170,7 +187,80 @@ function countValidationFailures(result: AuditResult): number {
 }
 
 function shaMatch(a: string, b: string): boolean {
-  const x = a.trim().toLowerCase();
-  const y = b.trim().toLowerCase();
-  return x === y || x.startsWith(y) || y.startsWith(x);
+  return (
+    fullSha(a) &&
+    fullSha(b) &&
+    a.toLowerCase() === b.toLowerCase()
+  );
+}
+
+function auditResultError(value: unknown): string | null {
+  if (!isRecord(value)) return "root must be an object";
+  if (!["pass", "fail", "uncertain"].includes(String(value.status))) {
+    return "status must be pass, fail, or uncertain";
+  }
+  if (!fullSha(value.base_sha)) return "base_sha must be a full 40-character SHA";
+  if (!fullSha(value.head_sha)) return "head_sha must be a full 40-character SHA";
+
+  if (!isRecord(value.standards)) return "standards must be an object";
+  if (
+    !findingArray(value.standards.documented_standard_violations) ||
+    !findingArray(value.standards.smell_judgement_calls)
+  ) {
+    return "standards finding lists are invalid";
+  }
+
+  if (!isRecord(value.spec)) return "spec must be an object";
+  if (
+    !findingArray(value.spec.missing_or_partial) ||
+    !findingArray(value.spec.incorrect_implementation) ||
+    !findingArray(value.spec.scope_creep)
+  ) {
+    return "spec finding lists are invalid";
+  }
+
+  if (!isRecord(value.validation)) return "validation must be an object";
+  const commands = value.validation.commands;
+  if (
+    !Array.isArray(commands) ||
+    commands.length === 0 ||
+    !commands.every(
+      (command) =>
+        isRecord(command) &&
+        typeof command.command === "string" &&
+        command.command.trim().length > 0 &&
+        Number.isInteger(command.exit_code) &&
+        typeof command.ok === "boolean",
+    )
+  ) {
+    return "validation.commands must contain actual command results";
+  }
+
+  if (value.notes !== undefined && typeof value.notes !== "string") {
+    return "notes must be a string";
+  }
+  return null;
+}
+
+function findingArray(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (finding) =>
+        isRecord(finding) &&
+        typeof finding.summary === "string" &&
+        finding.summary.trim().length > 0 &&
+        (finding.detail === undefined || typeof finding.detail === "string") &&
+        (finding.blocking === undefined ||
+          typeof finding.blocking === "boolean"),
+    )
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fullSha(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/i.test(value);
 }

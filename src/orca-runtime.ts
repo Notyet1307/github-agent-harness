@@ -984,6 +984,18 @@ export function taskList(orcaCli: string): unknown {
   return r.data ?? { error: r.error };
 }
 
+export function orchestrationTaskStatus(
+  orcaCli: string,
+  taskId: string,
+): string | null {
+  const r = orcaJson(orcaCli, ["orchestration", "task-list"]);
+  if (!r.ok || !r.data) return null;
+  const result = unwrapResult<{
+    tasks?: Array<{ id?: string; status?: string }>;
+  }>(r.data);
+  return result.tasks?.find((task) => task.id === taskId)?.status ?? null;
+}
+
 function extractMessages(data: unknown): OrchestrationMessage[] {
   if (!data) return [];
   const result = unwrapResult<{
