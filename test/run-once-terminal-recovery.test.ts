@@ -14,7 +14,13 @@ import { join } from "node:path";
 import { Ledger } from "../src/ledger.js";
 import { runOnce } from "../src/run-once.js";
 
-type FixtureMode = "new" | "pending" | "accepted" | "missing";
+type FixtureMode =
+  | "new"
+  | "ambiguous"
+  | "pending"
+  | "accepted"
+  | "working"
+  | "missing";
 
 function createFixture(mode: FixtureMode): {
   dir: string;
@@ -33,7 +39,11 @@ function createFixture(mode: FixtureMode): {
   git(worktree, "add", "value.txt");
   git(worktree, "commit", "-m", "base");
   const baseSha = git(worktree, "rev-parse", "HEAD");
-  if (mode === "pending" || mode === "accepted") {
+  if (
+    mode === "pending" ||
+    mode === "accepted" ||
+    mode === "working"
+  ) {
     writeFileSync(join(worktree, "value.txt"), "existing fix\n");
     git(worktree, "add", "value.txt");
     git(worktree, "commit", "-m", "existing fix");
@@ -58,7 +68,10 @@ if (args[0] === "status") {
 } else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${dir}`)})) {
   ok({ terminals: [{ handle: "controller-1", title: "test-controller", connected: true }] });
 } else if (key === "terminal list") {
-  ok({ terminals: [] });
+  ok({ terminals: mode === "ambiguous" ? [
+    { handle: "implementer-old-1", title: "issue-12-codex", connected: true },
+    { handle: "implementer-old-2", title: "issue-12-codex", connected: true }
+  ] : [] });
 } else if (key === "terminal create") {
   if (mode === "missing") {
     console.log(JSON.stringify({ ok: false, error: { message: "terminal create failed" } }));
@@ -84,8 +97,15 @@ if (args[0] === "status") {
   } });
 } else if (key === "terminal show") {
   ok({ terminal: { handle: "implementer-new", title: "issue-12-codex" } });
+} else if (key === "orchestration task-list") {
+  ok({ tasks: [{
+    id: mode === "new" || mode === "ambiguous" ? "task-new" : "task-existing",
+    status: mode === "working" || mode === "new" || mode === "ambiguous"
+      ? "working"
+      : "completed"
+  }] });
 } else if (key === "orchestration task-create") {
-  if (mode !== "new") {
+  if (mode !== "new" && mode !== "ambiguous") {
     console.log(JSON.stringify({ ok: false, error: { message: "unexpected task creation" } }));
     process.exitCode = 1;
   } else {
@@ -93,7 +113,7 @@ if (args[0] === "status") {
   }
 } else if (key === "orchestration dispatch") {
   const to = args[args.indexOf("--to") + 1];
-  if (mode !== "new" || to !== "implementer-new") {
+  if ((mode !== "new" && mode !== "ambiguous") || to !== "implementer-new") {
     console.log(JSON.stringify({ ok: false, error: { message: "dispatch used stale terminal " + to } }));
     process.exitCode = 1;
   } else {
@@ -124,7 +144,7 @@ if (args[0] === "status") {
     configPath,
     `version: 1
 issueLabel: ready-for-agent
-implementTimeoutMinutes: 1
+implementTimeoutMinutes: ${mode === "working" ? 0 : 1}
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}
@@ -173,7 +193,10 @@ repositories:
     implementerProfileId: "codex-default",
   });
   assert.equal(claim.ok, true);
-  const hasTask = mode === "pending" || mode === "accepted";
+  const hasTask =
+    mode === "pending" ||
+    mode === "accepted" ||
+    mode === "working";
   ledger.updateJob("job-terminal", {
     state: hasTask ? "implementing" : "worktree_ready",
     base_sha: baseSha,
@@ -227,6 +250,28 @@ test("runOnce rebinds a stale implementer terminal before dispatch", (t) => {
         args[args.indexOf("--to") + 1] === "implementer-new",
     ),
     true,
+  );
+});
+
+test("runOnce creates a terminal when an exact role title is ambiguous", (t) => {
+  const fixture = createFixture("ambiguous");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const dispatches = readCalls(fixture.callsPath).filter(
+    (args) =>
+      args[0] === "orchestration" && args[1] === "dispatch",
+  );
+  assert.equal(dispatches.length, 1);
+  assert.equal(
+    dispatches[0]?.[dispatches[0].indexOf("--to") + 1],
+    "implementer-new",
   );
 });
 
@@ -305,6 +350,23 @@ test("runOnce does not rebind or redispatch an accepted task", (t) => {
     ),
     false,
   );
+});
+
+test("runOnce does not finalize commits while the task is still working", (t) => {
+  const fixture = createFixture("working");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-existing is not completed.*working/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
 });
 
 function readCalls(path: string): string[][] {

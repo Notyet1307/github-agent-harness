@@ -123,11 +123,28 @@ function runOnceLocked(
     };
   }
   if (blockedRecovery) {
-    const taskStatus = orchestrationTaskStatus(
-      orcaCli,
-      blockedRecovery.taskId,
-    )?.toLowerCase();
-    if (taskStatus !== "completed" && taskStatus !== "failed") {
+    const taskStatus =
+      orchestrationTaskStatus(
+        orcaCli,
+        blockedRecovery.taskId,
+      )?.toLowerCase() ?? "unavailable";
+    if (
+      blockedRecovery.action === "finalize" &&
+      taskStatus !== "completed"
+    ) {
+      return {
+        ok: false,
+        jobId: job!.id,
+        message:
+          "blocked implementation task must be completed before finalize " +
+          `(Orca status=${taskStatus})`,
+      };
+    }
+    if (
+      blockedRecovery.action === "retry" &&
+      taskStatus !== "completed" &&
+      taskStatus !== "failed"
+    ) {
       return {
         ok: false,
         jobId: job!.id,
@@ -603,7 +620,7 @@ function runOnceLocked(
     }
   }
 
-  // 6) Wait worker_done — unless crash-recovery already sees commits (M5)
+  // 6) Wait worker_done unless a completed task already has commits (M5).
   if (job.state === "implementing") {
     const earlyHead =
       job.worktree_path && job.base_sha
@@ -613,16 +630,28 @@ function runOnceLocked(
       job.worktree_path && job.base_sha
         ? commitCountSince(job.worktree_path, job.base_sha)
         : 0;
-    if (
+    const hasEarlyCommits = Boolean(
       earlyHead &&
-      job.base_sha &&
-      earlyHead !== job.base_sha &&
-      earlyCommits >= 1
-    ) {
+        job.base_sha &&
+        earlyHead !== job.base_sha &&
+        earlyCommits >= 1,
+    );
+    const earlyTaskStatus = hasEarlyCommits
+      ? orchestrationTaskStatus(
+          orcaCli,
+          job.implementer_task_id!,
+        )?.toLowerCase() ?? "unavailable"
+      : null;
+    if (earlyTaskStatus === "completed") {
       log(
-        `M5 resume: commits already present (${earlyCommits}); skipping worker_done wait`,
+        `M5 resume: completed task has ${earlyCommits} commits; skipping worker_done wait`,
       );
     } else {
+      if (earlyTaskStatus) {
+        log(
+          `commits exist but task status=${earlyTaskStatus}; waiting for worker_done`,
+        );
+      }
       const timeoutMs = config.implementTimeoutMinutes * 60_000;
       log(
         `waiting worker_done up to ${config.implementTimeoutMinutes} minutes…`,
@@ -636,7 +665,7 @@ function runOnceLocked(
       });
 
       if (!done.ok) {
-        // Last-chance recovery: commits may have landed without worker_done
+        // Last-chance recovery: a completed task may have lost worker_done.
         const lateHead =
           job.worktree_path && job.base_sha
             ? revParse(job.worktree_path, "HEAD")
@@ -645,30 +674,45 @@ function runOnceLocked(
           job.worktree_path && job.base_sha
             ? commitCountSince(job.worktree_path, job.base_sha)
             : 0;
+        let recoveryError = done.error;
         if (
+          !done.escalated &&
           lateHead &&
           job.base_sha &&
           lateHead !== job.base_sha &&
           lateCommits >= 1
         ) {
-          log(
-            `worker_done missing but commits exist; continuing finalize (M5)`,
-          );
-        } else {
+          const taskStatus =
+            orchestrationTaskStatus(
+              orcaCli,
+              job.implementer_task_id!,
+            )?.toLowerCase() ?? "unavailable";
+          if (taskStatus === "completed") {
+            recoveryError = "";
+            log(
+              `worker_done missing but completed task has commits; continuing finalize (M5)`,
+            );
+          } else {
+            recoveryError =
+              `implementation task ${job.implementer_task_id} is not completed ` +
+              `(Orca status=${taskStatus})`;
+          }
+        }
+        if (recoveryError) {
           job = ledger.updateJob(job.id, {
             state: "blocked",
-            last_error: done.error,
+            last_error: recoveryError,
           });
           setWorktreeProgress(
             orcaCli,
             job.worktree_id!,
-            `harness: blocked — ${done.error}`,
+            `harness: blocked — ${recoveryError}`,
             "in-progress",
           );
           return {
             ok: false,
             jobId: job.id,
-            message: done.error,
+            message: recoveryError,
             details: { message: done.message },
           };
         }

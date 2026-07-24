@@ -39,6 +39,7 @@ type AuditFixtureMode =
   | "rework-escalated-commit"
   | "rework-late-commit"
   | "rework-resume-commit"
+  | "rework-working-commit"
   | "rework-retry-drift"
   | "rework-stale-terminal";
 
@@ -341,6 +342,32 @@ test("resumes a committed rework when worker_done was lost", (t) => {
     ).length,
     1,
   );
+});
+
+test("does not re-audit committed rework while its task is still working", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-working-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+  writeFileSync(join(fixture.worktree, "value.txt"), "unfinished fix\n");
+  git(fixture.worktree, "add", "value.txt");
+  git(fixture.worktree, "commit", "-m", "unfinished fix");
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-rework is not completed.*working/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  verified.close();
 });
 
 test("reports invalid rework evidence when worker_done is also lost", (t) => {
@@ -711,7 +738,13 @@ if (args[0] === "status") {
   } }));
 } else if (key === "orchestration task-list") {
   console.log(JSON.stringify({ ok: true, result: {
-    tasks: [{ id: "task-audit", status: "completed" }]
+    tasks: [
+      { id: "task-audit", status: "completed" },
+      {
+        id: "task-rework",
+        status: mode === "rework-working-commit" ? "working" : "completed"
+      }
+    ]
   } }));
 } else if (key === "orchestration task-create") {
   state.tasks += 1;
@@ -922,7 +955,8 @@ if (args[0] === "status") {
 issueLabel: ready-for-agent
 maxAuditRounds: 3
 implementTimeoutMinutes: ${
-      mode === "rework-resume-commit"
+      mode === "rework-resume-commit" ||
+      mode === "rework-working-commit"
         ? 0
         : mode === "rework-late-commit"
           ? 0.001

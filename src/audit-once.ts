@@ -764,11 +764,22 @@ function runReworkPhase(
   if (job.implementer_task_id) {
     const recovered = inspectReworkCompletion();
     if (recovered.ok) {
+      const taskStatus =
+        orchestrationTaskStatus(
+          orcaCli,
+          job.implementer_task_id,
+        )?.toLowerCase() ?? "unavailable";
+      if (taskStatus === "completed") {
+        log(
+          "M5 resume: completed rework task has commits; " +
+          "skipping worker_done wait",
+        );
+        return finishRework(recovered);
+      }
       log(
-        "M5 resume: committed rework already present; " +
-        "skipping worker_done wait",
+        `committed rework exists but task status=${taskStatus}; ` +
+        "waiting for worker_done",
       );
-      return finishRework(recovered);
     }
   }
   const dispatchFixedPointError = (): string | null => {
@@ -945,9 +956,20 @@ function runReworkPhase(
     }
     const recovered = inspectReworkCompletion();
     if (recovered.ok) {
+      const taskStatus =
+        orchestrationTaskStatus(
+          orcaCli,
+          job.implementer_task_id!,
+        )?.toLowerCase() ?? "unavailable";
+      if (taskStatus !== "completed") {
+        return blockRework(
+          `rework task ${job.implementer_task_id} is not completed ` +
+            `(Orca status=${taskStatus})`,
+        );
+      }
       log(
-        "worker_done missing but committed rework exists; " +
-        "continuing re-audit (M5)",
+        "worker_done missing but completed rework task has commits; " +
+          "continuing re-audit (M5)",
       );
       return finishRework(recovered);
     }

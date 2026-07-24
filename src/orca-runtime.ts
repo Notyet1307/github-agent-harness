@@ -242,15 +242,11 @@ export function ensureAgentTerminal(
           connected?: boolean;
         }>;
       }>(listed.data);
-      const match = (result.terminals ?? []).find((t) => {
-        const ttitle = (t.title ?? "").toLowerCase();
-        return (
-          t.connected !== false &&
-          (ttitle === title.toLowerCase() ||
-            ttitle.includes(profile.orcaAgent.toLowerCase()))
-        );
-      });
-      if (match?.handle) return match.handle;
+      const matches = (result.terminals ?? []).filter(
+        (terminal) =>
+          terminal.connected !== false && terminal.title === title,
+      );
+      if (matches.length === 1) return matches[0]!.handle;
     }
   }
 

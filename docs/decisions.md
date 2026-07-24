@@ -122,7 +122,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 |---|---|---|
 | Entry command | `harness recover` dry-run default, `--execute` to act | Safe after crash |
 | Routing | Pure `reconcileJob` → ensure* command | Testable without Orca |
-| Codex done / ledger stale | Commits since base ⇒ finalize without worker_done | Crash after implement |
+| Codex done / ledger stale | Exact Orca task `completed` plus commits since base ⇒ finalize without `worker_done` | Recover a lost completion message without advancing live or failed work |
 | Pi done / ledger stale | Reuse only a valid result for the exact base/HEAD when the same-round auditor task is completed | Crash recovery without accepting stale files |
 | Blocked audit wait | Known decision/timeout error + auditor task completed + current result + tracked clean ⇒ re-enter audit gate | Recover late evidence without accepting it directly |
 | PR create | Always find-by-head before create | No duplicate PR |
@@ -169,7 +169,8 @@ Do **not** hardcode Codex/Pi in transition logic.
 |---|---|---|
 | Completion matching | Parse string/object payloads, require the current task id plus the recorded dispatch id, and reject new dispatches with no id | Persistent controller inboxes can contain stale messages; missing provenance is not proof of completion |
 | Internal review subagents | No inherited Orca context; reports return only to the parent implementer | A reviewer must not be able to complete its parent's lifecycle task |
-| Late implementation commit | Verify and finalize the existing commits without redispatch | Completion can race with the final commit; Git/worktree evidence is authoritative |
-| Late rework commit | Verify a clean descendant of the exact audited HEAD and re-audit without redispatch | Rework commits can survive a lost `worker_done`; stale or divergent Git state still blocks |
-| Implementer terminal recovery | Re-resolve a connected terminal before each new or pending implementation/rework dispatch | Orca restarts can invalidate a non-empty stored handle |
+| Late implementation commit | Only for the exact recorded Orca task in `completed`, verify and finalize existing commits without redispatch | Git can recover a lost `worker_done`, but must not outrun live, failed, missing, or unreadable task state |
+| Late rework commit | Only for the exact recorded Orca task in `completed`, verify a clean descendant of the exact audited HEAD and re-audit without redispatch | Rework commits can survive a lost `worker_done`; stale or divergent Git/task state still blocks |
+| Escalation | Always block even when valid commits exist | Explicit worker requests must not be hidden by Git fallback |
+| Implementer terminal recovery | Reuse only one connected exact role-title match; otherwise create a fresh terminal before a new or pending dispatch | Orca restarts invalidate handles, while fuzzy or ambiguous matches can target another session |
 | No-commit completion recovery | Require readable HEAD at the pinned base; preserve the worktree and redispatch only via explicit `recover --execute` | Keep partial changes without letting failed retries or `watch` create retry loops |

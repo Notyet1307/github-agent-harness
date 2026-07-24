@@ -215,7 +215,14 @@ if (args[0] === "status") {
     writeFileSync(join(dirname(process.argv[1]), "mode"), "live");
   }
   console.log(JSON.stringify({ ok: true, result: {
-    tasks: [{ id: "task-old", status: mode === "live" ? "working" : "completed" }]
+    tasks: [{
+      id: "task-old",
+      status: mode === "live"
+        ? "working"
+        : mode === "failed"
+          ? "failed"
+          : "completed"
+    }]
   } }));
 } else if (key === "terminal list") {
   const target = args[args.indexOf("--worktree") + 1];
@@ -449,7 +456,7 @@ repositories:
   });
   assert.equal(liveTask.action.kind, "finalize_implement");
   assert.equal(liveTask.ok, false);
-  assert.match(liveTask.message, /task is not confirmed ended/);
+  assert.match(liveTask.message, /must be completed.*working/);
   const liveVerified = new Ledger(ledgerPath);
   assert.equal(liveVerified.getJob("job-retry")?.state, "blocked");
   assert.equal(
@@ -457,6 +464,20 @@ repositories:
     IMPLEMENT_NO_COMMITS_ERROR,
   );
   liveVerified.close();
+
+  writeFileSync(modePath, "failed");
+  const failedTask = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+  assert.equal(failedTask.action.kind, "finalize_implement");
+  assert.equal(failedTask.ok, false);
+  assert.match(failedTask.message, /must be completed.*failed/);
+  const failedTaskVerified = new Ledger(ledgerPath);
+  assert.equal(failedTaskVerified.getJob("job-retry")?.state, "blocked");
+  failedTaskVerified.close();
 
   writeFileSync(modePath, "dirty-after-hints");
 
