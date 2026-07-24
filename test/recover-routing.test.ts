@@ -466,15 +466,26 @@ repositories:
   liveVerified.close();
 
   writeFileSync(modePath, "failed");
+  const failedTaskPlan = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: true,
+  });
+  assert.equal(failedTaskPlan.action.kind, "blocked");
+  assert.equal(failedTaskPlan.executed, false);
+  assert.match(failedTaskPlan.message, /task task-old failed/);
+
   const failedTask = recover({
     configPath,
     ledgerPath,
     lockPath: join(dir, "harness.lock"),
     dryRun: false,
   });
-  assert.equal(failedTask.action.kind, "finalize_implement");
+  assert.equal(failedTask.action.kind, "blocked");
   assert.equal(failedTask.ok, false);
-  assert.match(failedTask.message, /must be completed.*failed/);
+  assert.equal(failedTask.executed, false);
+  assert.equal(failedTask.message, failedTaskPlan.message);
   const failedTaskVerified = new Ledger(ledgerPath);
   assert.equal(failedTaskVerified.getJob("job-retry")?.state, "blocked");
   failedTaskVerified.close();

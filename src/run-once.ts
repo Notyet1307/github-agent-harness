@@ -5,6 +5,7 @@ import {
   getImplementerProfile,
   loadConfig,
 } from "./config.js";
+import { trackedDirty } from "./audit-gate.js";
 import {
   commitCountSince,
   currentBranch,
@@ -453,6 +454,46 @@ function runOnceLocked(
     log(`reusing worktree ${job.worktree_path}`);
   }
 
+  const blockFailedImplementation = (taskId: string): RunOnceResult => {
+    const error =
+      `implementation task ${taskId} is not completed ` +
+      "(Orca status=failed)";
+    job = ledger.updateJob(job!.id, {
+      state: "blocked",
+      last_error: error,
+    });
+    setWorktreeProgress(
+      orcaCli,
+      job.worktree_id!,
+      `harness: blocked — ${error}`,
+      "in-progress",
+    );
+    return { ok: false, jobId: job.id, message: error };
+  };
+  const failedPendingTaskId =
+    job.dispatch_probe_pending === 1 &&
+    job.implementer_task_id &&
+    orchestrationTaskStatus(
+      orcaCli,
+      job.implementer_task_id,
+    )?.toLowerCase() === "failed"
+      ? job.implementer_task_id
+      : null;
+  if (
+    failedPendingTaskId &&
+    job.worktree_path &&
+    job.base_sha
+  ) {
+    const head = revParse(job.worktree_path, "HEAD");
+    if (
+      head &&
+      head !== job.base_sha &&
+      commitCountSince(job.worktree_path, job.base_sha) >= 1
+    ) {
+      return blockFailedImplementation(failedPendingTaskId);
+    }
+  }
+
   const needsImplementerDispatch =
     !job.implementer_task_id || job.dispatch_probe_pending === 1;
   let liveImplementerHandle = job.implementer_terminal_handle;
@@ -501,6 +542,21 @@ function runOnceLocked(
         message: "missing base_sha/branch/worktree_path before dispatch",
       };
     }
+    const dispatchBaseSha = job.base_sha;
+    const dispatchWorktreePath = job.worktree_path;
+    const dispatchFixedPointError = (): string | null => {
+      const head = revParse(dispatchWorktreePath, "HEAD");
+      if (head !== dispatchBaseSha) {
+        return (
+          "implementation HEAD changed before implementation dispatch: " +
+          `expected ${dispatchBaseSha}, got ${head ?? "unreadable"}`
+        );
+      }
+      const dirty = trackedDirty(dispatchWorktreePath);
+      return dirty
+        ? `tracked files dirty before implementation dispatch:\n${dirty}`
+        : null;
+    };
 
     const spec = renderImplementerSpec({
       repo: repo.github,
@@ -526,6 +582,7 @@ function runOnceLocked(
             attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
           }
         : undefined;
+    let taskCreateGuardError: string | null = null;
     const ensured = dispatchTaskEnsured(orcaCli, {
       title: `Implement ${repo.github}#${job.issue_number}`,
       displayName: `issue-${job.issue_number}-implement`,
@@ -534,6 +591,12 @@ function runOnceLocked(
       from: job.controller_terminal_handle!,
       onLog: log,
       existingDispatch,
+      beforeTaskCreate: failedPendingTaskId
+        ? () => {
+            taskCreateGuardError = dispatchFixedPointError();
+            return taskCreateGuardError;
+          }
+        : undefined,
       onDispatched: (event) => {
         job = ledger.updateJob(jobId, {
           state: "implementing",
@@ -569,12 +632,16 @@ function runOnceLocked(
         ? ensured.lastDispatchId ?? null
         : job.implementer_dispatch_id;
       const shouldBlock =
+        taskCreateGuardError !== null ||
         ensured.kind === "exhausted" ||
         (hasLastTask && dispatchId === null) ||
         blockedRecovery?.action === "retry";
+      const dispatchError =
+        taskCreateGuardError ??
+        `dispatch ${ensured.kind}: ${ensured.error}`;
       job = ledger.updateJob(job.id, {
         state: shouldBlock ? "blocked" : job.state,
-        last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
+        last_error: dispatchError,
         implementer_terminal_handle: ensured.to,
         implementer_task_id: taskId,
         implementer_dispatch_id: dispatchId,
@@ -587,7 +654,7 @@ function runOnceLocked(
       setWorktreeProgress(
         orcaCli,
         job.worktree_id!,
-        `harness: dispatch ${ensured.kind} — ${ensured.error}`.slice(0, 180),
+        `harness: ${dispatchError}`.slice(0, 180),
         "in-progress",
       );
       return { ok: false, jobId: job.id, message: ensured.error };
@@ -602,6 +669,9 @@ function runOnceLocked(
       dispatch_probe_pending: 0,
       last_error: null,
     });
+    if (ensured.taskId === failedPendingTaskId) {
+      return blockFailedImplementation(ensured.taskId);
+    }
     setWorktreeProgress(
       orcaCli,
       job.worktree_id!,
@@ -621,6 +691,7 @@ function runOnceLocked(
   }
 
   // 6) Wait worker_done unless a completed task already has commits (M5).
+  let completedTaskRecovery = false;
   if (job.state === "implementing") {
     const earlyHead =
       job.worktree_path && job.base_sha
@@ -642,7 +713,11 @@ function runOnceLocked(
           job.implementer_task_id!,
         )?.toLowerCase() ?? "unavailable"
       : null;
+    if (earlyTaskStatus === "failed") {
+      return blockFailedImplementation(job.implementer_task_id!);
+    }
     if (earlyTaskStatus === "completed") {
+      completedTaskRecovery = true;
       log(
         `M5 resume: completed task has ${earlyCommits} commits; skipping worker_done wait`,
       );
@@ -689,6 +764,7 @@ function runOnceLocked(
             )?.toLowerCase() ?? "unavailable";
           if (taskStatus === "completed") {
             recoveryError = "";
+            completedTaskRecovery = true;
             log(
               `worker_done missing but completed task has commits; continuing finalize (M5)`,
             );
@@ -717,6 +793,14 @@ function runOnceLocked(
           };
         }
       } else {
+        if (
+          orchestrationTaskStatus(
+            orcaCli,
+            job.implementer_task_id!,
+          )?.toLowerCase() === "failed"
+        ) {
+          return blockFailedImplementation(job.implementer_task_id!);
+        }
         log("received worker_done");
       }
     }
@@ -758,6 +842,27 @@ function runOnceLocked(
       message: "no commits since base SHA",
       details: { baseSha, headSha, dirty },
     };
+  }
+
+  if (completedTaskRecovery) {
+    const tracked = trackedDirty(worktreePath);
+    if (tracked) {
+      const error =
+        "tracked files dirty or unreadable after completed task recovery:\n" +
+        tracked;
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: error,
+        head_sha: headSha,
+      });
+      setWorktreeProgress(
+        orcaCli,
+        job.worktree_id!,
+        "harness: blocked — completed task recovery is not clean",
+        "in-progress",
+      );
+      return { ok: false, jobId: job.id, message: error };
+    }
   }
 
   if (pushed) {

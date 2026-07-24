@@ -58,15 +58,29 @@ export function reconcileJob(
       return { kind: "noop", reason: `terminal state ${job.state}` };
 
     case "blocked": {
-      const implementationEnded =
+      const implementTaskStatus =
+        hints.implementTaskStatus?.toLowerCase() ?? "";
+      const implementationEnded = Boolean(
         job.implementer_task_id &&
         job.last_error === IMPLEMENT_NO_COMMITS_ERROR &&
         hints.worktreeExists === true &&
-        ["completed", "failed"].includes(
-          hints.implementTaskStatus?.toLowerCase() ?? "",
-        );
+        ["completed", "failed"].includes(implementTaskStatus),
+      );
       if (
         implementationEnded &&
+        implementTaskStatus === "failed" &&
+        hints.hasCommitsSinceBase === true
+      ) {
+        return {
+          kind: "blocked",
+          reason:
+            `implementation task ${job.implementer_task_id} failed; ` +
+            "commits cannot substitute for task completion",
+        };
+      }
+      if (
+        implementationEnded &&
+        implementTaskStatus === "completed" &&
         hints.hasCommitsSinceBase === true &&
         hints.trackedClean === true
       ) {
@@ -117,15 +131,21 @@ export function reconcileJob(
       };
 
     case "implementing":
+      if (
+        hints.hasCommitsSinceBase &&
+        hints.implementTaskStatus?.toLowerCase() === "failed"
+      ) {
+        return {
+          kind: "run_once",
+          reason:
+            "failed implementation task has commits; resume will record a block",
+        };
+      }
       // Crash after Codex finished but before ledger flip:
       if (
         hints.hasCommitsSinceBase &&
-        hints.trackedClean !== false &&
-        (hints.implementTaskStatus === "completed" ||
-          hints.implementTaskStatus === "failed" ||
-          // If we have commits and no live task status, still prefer advance
-          // when re-entering recover (worker_done may have been lost).
-          hints.implementTaskStatus == null)
+        hints.trackedClean === true &&
+        hints.implementTaskStatus?.toLowerCase() === "completed"
       ) {
         // Still route through run_once which will detect commits and flip.
         return {

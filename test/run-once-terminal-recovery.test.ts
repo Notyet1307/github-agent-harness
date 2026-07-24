@@ -18,8 +18,13 @@ type FixtureMode =
   | "new"
   | "ambiguous"
   | "pending"
+  | "pending-failed"
+  | "pending-failed-race"
   | "accepted"
   | "working"
+  | "failed"
+  | "late-failed"
+  | "dirty"
   | "missing";
 
 function createFixture(mode: FixtureMode): {
@@ -42,11 +47,16 @@ function createFixture(mode: FixtureMode): {
   if (
     mode === "pending" ||
     mode === "accepted" ||
-    mode === "working"
+    mode === "working" ||
+    mode === "failed" ||
+    mode === "dirty"
   ) {
     writeFileSync(join(worktree, "value.txt"), "existing fix\n");
     git(worktree, "add", "value.txt");
     git(worktree, "commit", "-m", "existing fix");
+    if (mode === "dirty") {
+      writeFileSync(join(worktree, "value.txt"), "dirty fix\n");
+    }
   }
 
   const callsPath = join(dir, "orca-calls.jsonl");
@@ -92,6 +102,7 @@ if (args[0] === "status") {
     nextCursor: dispatched ? "2" : "1",
     tail:
       mode === "pending"
+        || mode === "pending-failed"
         ? ["Your task id is task-existing"]
         : dispatched ? ["Your task id is task-new"] : []
   } });
@@ -100,12 +111,22 @@ if (args[0] === "status") {
 } else if (key === "orchestration task-list") {
   ok({ tasks: [{
     id: mode === "new" || mode === "ambiguous" ? "task-new" : "task-existing",
-    status: mode === "working" || mode === "new" || mode === "ambiguous"
-      ? "working"
-      : "completed"
+    status:
+      mode === "failed" ||
+      mode === "pending-failed" ||
+      mode === "pending-failed-race" ||
+      mode === "late-failed"
+      ? "failed"
+      : mode === "working" || mode === "new" || mode === "ambiguous"
+        ? "working"
+        : "completed"
   }] });
 } else if (key === "orchestration task-create") {
-  if (mode !== "new" && mode !== "ambiguous") {
+  if (
+    mode !== "new" &&
+    mode !== "ambiguous" &&
+    mode !== "pending-failed-race"
+  ) {
     console.log(JSON.stringify({ ok: false, error: { message: "unexpected task creation" } }));
     process.exitCode = 1;
   } else {
@@ -113,7 +134,14 @@ if (args[0] === "status") {
   }
 } else if (key === "orchestration dispatch") {
   const to = args[args.indexOf("--to") + 1];
-  if ((mode !== "new" && mode !== "ambiguous") || to !== "implementer-new") {
+  if (
+    (
+      mode !== "new" &&
+      mode !== "ambiguous" &&
+      mode !== "pending-failed-race"
+    ) ||
+    to !== "implementer-new"
+  ) {
     console.log(JSON.stringify({ ok: false, error: { message: "dispatch used stale terminal " + to } }));
     process.exitCode = 1;
   } else {
@@ -123,12 +151,33 @@ if (args[0] === "status") {
     writeFileSync(${JSON.stringify(statePath)}, "dispatched");
     ok({ dispatchId: "dispatch-new" });
   }
+} else if (key === "orchestration task-update") {
+  if (mode === "pending-failed-race") {
+    writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "late failed fix\\n");
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]);
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "late failed fix"]);
+    ok({});
+  } else {
+    console.log(JSON.stringify({ ok: false, error: { message: "unexpected task update" } }));
+    process.exitCode = 1;
+  }
 } else if (key === "orchestration check") {
-  ok({ messages: [{
-    type: "worker_done",
-    taskId: "task-new",
-    dispatchId: "dispatch-new"
-  }] });
+  if (mode === "late-failed") {
+    writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "late failed fix\\n");
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]);
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "late failed fix"]);
+    ok({ messages: [{
+      type: "worker_done",
+      taskId: "task-existing",
+      dispatchId: "dispatch-existing"
+    }] });
+  } else {
+    ok({ messages: [{
+      type: "worker_done",
+      taskId: "task-new",
+      dispatchId: "dispatch-new"
+    }] });
+  }
 } else if (key === "worktree set") {
   ok({});
 } else {
@@ -144,7 +193,14 @@ if (args[0] === "status") {
     configPath,
     `version: 1
 issueLabel: ready-for-agent
-implementTimeoutMinutes: ${mode === "working" ? 0 : 1}
+implementTimeoutMinutes: ${
+      mode === "working" ||
+      mode === "failed" ||
+      mode === "pending-failed" ||
+      mode === "pending-failed-race"
+        ? 0.001
+        : 1
+    }
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}
@@ -195,8 +251,13 @@ repositories:
   assert.equal(claim.ok, true);
   const hasTask =
     mode === "pending" ||
+    mode === "pending-failed" ||
+    mode === "pending-failed-race" ||
     mode === "accepted" ||
-    mode === "working";
+    mode === "working" ||
+    mode === "failed" ||
+    mode === "late-failed" ||
+    mode === "dirty";
   ledger.updateJob("job-terminal", {
     state: hasTask ? "implementing" : "worktree_ready",
     base_sha: baseSha,
@@ -207,7 +268,12 @@ repositories:
     implementer_task_id: hasTask ? "task-existing" : null,
     implementer_dispatch_id: hasTask ? "dispatch-existing" : null,
     dispatch_attempt: hasTask ? 1 : 0,
-    dispatch_probe_pending: mode === "pending" ? 1 : 0,
+    dispatch_probe_pending:
+      mode === "pending" ||
+      mode === "pending-failed" ||
+      mode === "pending-failed-race"
+        ? 1
+        : 0,
   });
   ledger.close();
 
@@ -323,6 +389,68 @@ test("runOnce rebinds an acceptance-pending task without redispatch", (t) => {
   );
 });
 
+test("runOnce blocks when a pending probe accepts the same failed task", (t) => {
+  const fixture = createFixture("pending-failed");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-existing is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  assert.equal(verified.getJob("job-terminal")?.dispatch_probe_pending, 0);
+  verified.close();
+  const calls = readCalls(fixture.callsPath);
+  assert.equal(
+    calls.some(
+      (args) =>
+        args[0] === "orchestration" &&
+        (args[1] === "task-create" || args[1] === "dispatch"),
+    ),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    false,
+  );
+});
+
+test("runOnce blocks when a failed pending task commits during its probe", (t) => {
+  const fixture = createFixture("pending-failed-race");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const startedAt = Date.now();
+  let elapsed = 0;
+  t.mock.method(Date, "now", () => startedAt + (elapsed += 30_000));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /HEAD changed before implementation dispatch/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
+  const calls = readCalls(fixture.callsPath);
+  assert.equal(
+    calls.some(
+      (args) =>
+        args[0] === "orchestration" &&
+        (args[1] === "task-create" || args[1] === "dispatch"),
+    ),
+    false,
+  );
+});
+
 test("runOnce does not rebind or redispatch an accepted task", (t) => {
   const fixture = createFixture("accepted");
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
@@ -367,6 +495,81 @@ test("runOnce does not finalize commits while the task is still working", (t) =>
   const verified = new Ledger(fixture.ledgerPath);
   assert.equal(verified.getJob("job-terminal")?.state, "blocked");
   verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    true,
+  );
+});
+
+test("runOnce blocks a failed task with commits without waiting", (t) => {
+  const fixture = createFixture("failed");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-existing is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    false,
+  );
+});
+
+test("runOnce does not accept worker_done after the task becomes failed", (t) => {
+  const fixture = createFixture("late-failed");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-existing is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    true,
+  );
+});
+
+test("runOnce does not finalize completed task commits when tracked files are dirty", (t) => {
+  const fixture = createFixture("dirty");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /tracked files dirty/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    false,
+  );
 });
 
 function readCalls(path: string): string[][] {

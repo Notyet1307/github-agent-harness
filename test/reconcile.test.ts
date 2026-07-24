@@ -56,13 +56,41 @@ test("claimed / worktree_ready → run_once", () => {
   assert.equal(reconcileJob(job({ state: "worktree_ready" })).kind, "run_once");
 });
 
-test("implementing with commits → run_once finalize path", () => {
+test("implementing with completed task commits → run_once finalize path", () => {
   const a = reconcileJob(job({ state: "implementing" }), {
     hasCommitsSinceBase: true,
     trackedClean: true,
+    implementTaskStatus: "completed",
   });
   assert.equal(a.kind, "run_once");
   assert.match(a.reason, /commits/i);
+});
+
+test("completed task commits do not plan finalize without tracked status", () => {
+  const a = reconcileJob(job({ state: "implementing" }), {
+    hasCommitsSinceBase: true,
+    implementTaskStatus: "completed",
+  });
+
+  assert.equal(a.kind, "run_once");
+  assert.doesNotMatch(a.reason, /finalize/i);
+});
+
+test("implementing with commits from a failed task records a block", () => {
+  const a = reconcileJob(
+    job({
+      state: "implementing",
+      implementer_task_id: "task-implement",
+    }),
+    {
+      hasCommitsSinceBase: true,
+      trackedClean: true,
+      implementTaskStatus: "failed",
+    },
+  );
+
+  assert.equal(a.kind, "run_once");
+  assert.match(a.reason, /failed.*record.*block/i);
 });
 
 test("awaiting_audit → audit_once", () => {

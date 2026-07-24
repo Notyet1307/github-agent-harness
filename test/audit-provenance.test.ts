@@ -40,6 +40,9 @@ type AuditFixtureMode =
   | "rework-late-commit"
   | "rework-resume-commit"
   | "rework-working-commit"
+  | "rework-failed-commit"
+  | "rework-late-failed"
+  | "rework-pending-failed"
   | "rework-retry-drift"
   | "rework-stale-terminal";
 
@@ -312,6 +315,51 @@ test("resumes a pending rework dispatch after its worker committed", (t) => {
   );
 });
 
+test("resumes a pending failed acceptance before applying the failed-task guard", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-pending-failed",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", { dispatch_probe_pending: 1 });
+  ledger.close();
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-rework is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.dispatch_probe_pending, 0);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    0,
+  );
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    false,
+  );
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "terminal" && args[1] === "read",
+    ),
+    true,
+  );
+});
+
 test("resumes a committed rework when worker_done was lost", (t) => {
   const fixture = createAuditFixture(
     actionableAuditFailure,
@@ -368,6 +416,77 @@ test("does not re-audit committed rework while its task is still working", (t) =
   assert.equal(verified.getJob("job-audit")?.state, "blocked");
   assert.equal(verified.getJob("job-audit")?.audit_round, 1);
   verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    true,
+  );
+});
+
+test("blocks committed rework immediately when its task failed", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-failed-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+  writeFileSync(join(fixture.worktree, "value.txt"), "failed fix\n");
+  git(fixture.worktree, "add", "value.txt");
+  git(fixture.worktree, "commit", "-m", "failed fix");
+  writeFileSync(join(fixture.worktree, "value.txt"), "dirty failed fix\n");
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", { dispatch_probe_pending: 1 });
+  ledger.close();
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-rework is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    false,
+  );
+});
+
+test("does not accept rework worker_done after the task becomes failed", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-late-failed",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /task task-rework is not completed.*failed/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "check",
+    ),
+    true,
+  );
 });
 
 test("reports invalid rework evidence when worker_done is also lost", (t) => {
@@ -742,7 +861,15 @@ if (args[0] === "status") {
       { id: "task-audit", status: "completed" },
       {
         id: "task-rework",
-        status: mode === "rework-working-commit" ? "working" : "completed"
+        status:
+          mode === "rework-late-failed"
+            ? state.checks === 0 ? "working" : "failed"
+            : mode === "rework-failed-commit" ||
+          mode === "rework-pending-failed"
+            ? "failed"
+            : mode === "rework-working-commit"
+              ? "working"
+              : "completed"
       }
     ]
   } }));
@@ -884,7 +1011,11 @@ if (args[0] === "status") {
     } }));
     process.exit(0);
   }
-  if (mode === "rework-resume-commit") {
+  if (
+    mode === "rework-resume-commit" ||
+    mode === "rework-working-commit" ||
+    mode === "rework-failed-commit"
+  ) {
     console.log(JSON.stringify({ ok: true, result: { messages:
       state.tasks === 0 ? [] : [{
         type: "worker_done",
@@ -915,7 +1046,8 @@ if (args[0] === "status") {
     first &&
     (
       mode === "rework-dirty" ||
-      mode === "rework-commit"
+      mode === "rework-commit" ||
+      mode === "rework-late-failed"
     )
   ) {
     writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "reworked\\n");
@@ -956,8 +1088,9 @@ issueLabel: ready-for-agent
 maxAuditRounds: 3
 implementTimeoutMinutes: ${
       mode === "rework-resume-commit" ||
-      mode === "rework-working-commit"
-        ? 0
+      mode === "rework-working-commit" ||
+      mode === "rework-failed-commit"
+        ? 0.001
         : mode === "rework-late-commit"
           ? 0.001
           : 45

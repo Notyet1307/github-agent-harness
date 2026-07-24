@@ -666,6 +666,10 @@ function runReworkPhase(
     });
     return { ok: false, jobId: job.id, message: error };
   };
+  const blockFailedTask = (taskId: string): AuditOnceResult =>
+    blockRework(
+      `rework task ${taskId} is not completed (Orca status=failed)`,
+    );
   const auditHeadSha = job.audit_head_sha;
   if (!auditHeadSha) {
     return blockRework("rework missing audited HEAD");
@@ -761,14 +765,28 @@ function runReworkPhase(
       details: completion,
     };
   };
+  let failedPendingTaskId: string | null = null;
   if (job.implementer_task_id) {
+    const taskStatus =
+      orchestrationTaskStatus(
+        orcaCli,
+        job.implementer_task_id,
+      )?.toLowerCase() ?? "unavailable";
+    const canRetryFailedAcceptance =
+      taskStatus === "failed" &&
+      job.dispatch_probe_pending === 1 &&
+      revParse(worktreePath, "HEAD") === auditHeadSha;
+    failedPendingTaskId = canRetryFailedAcceptance
+      ? job.implementer_task_id
+      : null;
+    if (
+      taskStatus === "failed" &&
+      !canRetryFailedAcceptance
+    ) {
+      return blockFailedTask(job.implementer_task_id);
+    }
     const recovered = inspectReworkCompletion();
     if (recovered.ok) {
-      const taskStatus =
-        orchestrationTaskStatus(
-          orcaCli,
-          job.implementer_task_id,
-        )?.toLowerCase() ?? "unavailable";
       if (taskStatus === "completed") {
         log(
           "M5 resume: completed rework task has commits; " +
@@ -930,6 +948,9 @@ function runReworkPhase(
       dispatch_probe_pending: 0,
       last_error: null,
     });
+    if (ensured.taskId === failedPendingTaskId) {
+      return blockFailedTask(ensured.taskId);
+    }
     log(
       `dispatch ok attempt=${ensured.attempt} rework task=${ensured.taskId}`,
     );
@@ -976,6 +997,14 @@ function runReworkPhase(
     return blockRework(`${done.error}; ${recovered.error}`);
   }
 
+  if (
+    orchestrationTaskStatus(
+      orcaCli,
+      job.implementer_task_id!,
+    )?.toLowerCase() === "failed"
+  ) {
+    return blockFailedTask(job.implementer_task_id!);
+  }
   const completion = inspectReworkCompletion();
   return completion.ok
     ? finishRework(completion)
