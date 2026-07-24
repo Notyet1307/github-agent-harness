@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
 import { orcaJson, unwrapResult } from "./orca.js";
 import { execFile } from "./exec.js";
@@ -107,7 +108,9 @@ export function ensureIssueWorktree(
   repo: RepoConfig,
   issueNumber: number,
   profile: AgentProfile,
-): { ok: true; value: WorktreeCreateResult } | { ok: false; error: string } {
+):
+  | { ok: true; value: WorktreeCreateResult }
+  | { ok: false; error: string; retryable?: boolean } {
   const name = `issue-${issueNumber}`;
 
   // Reuse existing worktree for this issue if present.
@@ -117,41 +120,122 @@ export function ensureIssueWorktree(
     "--repo",
     `id:${repo.orcaRepoId}`,
   ]);
-  if (listed.ok && listed.data) {
-    const result = unwrapResult<{
-      worktrees?: Array<{
-        id: string;
-        path: string;
-        displayName?: string;
-        branch?: string;
-        linkedIssue?: number | null;
-      }>;
-    }>(listed.data);
-    const existing = (result.worktrees ?? []).find(
-      (w) =>
-        w.linkedIssue === issueNumber ||
-        w.displayName === name ||
-        w.displayName === `issue-${issueNumber}` ||
-        w.path?.includes(`/issue-${issueNumber}`),
-    );
-    if (existing) {
-      const agentHandle = ensureAgentTerminal(
-        orcaCli,
-        existing.id,
-        profile,
-        `issue-${issueNumber}-${profile.orcaAgent}`,
-      );
+  if (!listed.ok || !listed.data) {
+    return {
+      ok: false,
+      error: `Orca worktree list failed: ${listed.error ?? "missing response"}`,
+      retryable: true,
+    };
+  }
+  const listResult = unwrapResult<{
+    worktrees?: Array<{
+      id: string;
+      path: string;
+      displayName?: string;
+      branch?: string;
+      linkedIssue?: number | null;
+      workspaceStatus?: string;
+    }>;
+    totalCount?: unknown;
+    truncated?: unknown;
+  }>(listed.data);
+  if (listResult.truncated === true) {
+    return {
+      ok: false,
+      error: "truncated worktree list cannot prove issue worktree absence",
+    };
+  }
+  if (
+    listResult.truncated !== false ||
+    !Number.isInteger(listResult.totalCount) ||
+    (listResult.totalCount as number) < 0
+  ) {
+    return {
+      ok: false,
+      error:
+        "invalid worktree list completeness metadata: " +
+        "expected truncated=false and a non-negative integer totalCount",
+    };
+  }
+  if (!Array.isArray(listResult.worktrees)) {
+    return {
+      ok: false,
+      error:
+        "invalid worktree list: " +
+        "result.worktrees is not an array",
+    };
+  }
+  if (listResult.totalCount !== listResult.worktrees.length) {
+    return {
+      ok: false,
+      error:
+        `worktree list totalCount=${listResult.totalCount} ` +
+        `does not match ${listResult.worktrees.length} returned entries`,
+    };
+  }
+  const invalidIndex = listResult.worktrees.findIndex(
+    (worktree) =>
+      !worktree ||
+      typeof worktree.id !== "string" ||
+      !worktree.id.trim() ||
+      typeof worktree.path !== "string" ||
+      !worktree.path.trim() ||
+      (worktree.displayName != null &&
+        typeof worktree.displayName !== "string") ||
+      (worktree.branch != null && typeof worktree.branch !== "string") ||
+      (worktree.linkedIssue != null &&
+        (!Number.isInteger(worktree.linkedIssue) ||
+          worktree.linkedIssue < 1)) ||
+      (worktree.workspaceStatus != null &&
+        typeof worktree.workspaceStatus !== "string"),
+  );
+  if (invalidIndex !== -1) {
+    return {
+      ok: false,
+      error: `invalid worktree list entry at index ${invalidIndex}`,
+    };
+  }
+  const matches = listResult.worktrees.filter(
+    (worktree) =>
+      worktree.linkedIssue === issueNumber ||
+      (worktree.linkedIssue == null &&
+        (worktree.displayName === name ||
+          basename(worktree.path) === name)),
+  );
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      error:
+        `multiple worktrees match issue #${issueNumber}: ` +
+        matches.map((worktree) => worktree.id).join(", "),
+    };
+  }
+  const existing = matches[0];
+  if (existing) {
+    if (existing.workspaceStatus === "completed") {
       return {
-        ok: true,
-        value: {
-          worktreeId: existing.id,
-          worktreePath: existing.path,
-          agentTerminalHandle: agentHandle,
-          branch: existing.branch ?? null,
-          raw: existing,
-        },
+        ok: false,
+        error:
+          `completed worktree already exists for issue #${issueNumber}: ` +
+          existing.id,
       };
     }
+    const agentHandle = ensureAgentTerminal(
+      orcaCli,
+      existing.id,
+      profile,
+      `issue-${issueNumber}-${profile.orcaAgent}`,
+    );
+    return {
+      ok: true,
+      value: {
+        worktreeId: existing.id,
+        worktreePath: existing.path,
+        agentTerminalHandle: agentHandle,
+        branch: existing.branch ?? null,
+        raw: existing,
+      },
+    };
   }
 
   // Create worktree WITHOUT --agent first. On this machine, combining

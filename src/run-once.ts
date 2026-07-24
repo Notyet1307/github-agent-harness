@@ -48,6 +48,9 @@ type BlockedImplementationRecovery = {
   dispatchId: string | null;
 };
 
+const HARD_WORKTREE_DISCOVERY_ERROR_PREFIX =
+  "worktree discovery blocked: ";
+
 export function runOnce(options: {
   configPath?: string;
   ledgerPath?: string;
@@ -239,9 +242,11 @@ function runOnceLocked(
         // Allow automatic retry of blocked jobs that never got a worktree /
         // never dispatched (transient Orca failures). Hard blocks after
         // implement still need human cancel.
+        const lastError = job.last_error ?? "";
         const retryable =
           !job.implementer_task_id &&
-          (job.last_error ?? "").toLowerCase().includes("orca");
+          !lastError.startsWith(HARD_WORKTREE_DISCOVERY_ERROR_PREFIX) &&
+          lastError.toLowerCase().includes("orca");
         if (!retryable) {
           return {
             ok: false,
@@ -380,8 +385,10 @@ function runOnceLocked(
     );
     if (!wt.ok) {
       job = ledger.updateJob(job.id, {
-        state: "blocked",
-        last_error: wt.error,
+        state: wt.retryable ? "claimed" : "blocked",
+        last_error: wt.retryable
+          ? wt.error
+          : `${HARD_WORKTREE_DISCOVERY_ERROR_PREFIX}${wt.error}`,
       });
       return { ok: false, jobId: job.id, message: wt.error };
     }
@@ -440,6 +447,7 @@ function runOnceLocked(
       branch: branchResult.branch,
       implementer_terminal_handle: wt.value.agentTerminalHandle,
       implementer_profile_id: implementer.id,
+      last_error: null,
     });
     setWorktreeProgress(
       orcaCli,

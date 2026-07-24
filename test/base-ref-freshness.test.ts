@@ -151,7 +151,11 @@ if (args[0] === "status") {
     terminals: [{ handle: "controller-1", title: "test-controller", connected: true }]
   } }));
 } else if (key === "worktree list") {
-  console.log(JSON.stringify({ ok: true, result: { worktrees: [] } }));
+  console.log(JSON.stringify({ ok: true, result: {
+    worktrees: [],
+    totalCount: 0,
+    truncated: false
+  } }));
 } else if (key === "worktree create") {
   console.log(JSON.stringify({ ok: true, result: {
     worktree: {
