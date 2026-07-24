@@ -59,6 +59,7 @@ test("claimed / worktree_ready → run_once", () => {
 test("implementing with completed task commits → run_once finalize path", () => {
   const a = reconcileJob(job({ state: "implementing" }), {
     hasCommitsSinceBase: true,
+    baseIsAncestor: true,
     trackedClean: true,
     implementTaskStatus: "completed",
   });
@@ -69,6 +70,7 @@ test("implementing with completed task commits → run_once finalize path", () =
 test("completed task commits do not plan finalize without tracked status", () => {
   const a = reconcileJob(job({ state: "implementing" }), {
     hasCommitsSinceBase: true,
+    baseIsAncestor: true,
     implementTaskStatus: "completed",
   });
 
@@ -84,6 +86,7 @@ test("implementing with commits from a failed task records a block", () => {
     }),
     {
       hasCommitsSinceBase: true,
+      baseIsAncestor: true,
       trackedClean: true,
       implementTaskStatus: "failed",
     },
@@ -94,20 +97,36 @@ test("implementing with commits from a failed task records a block", () => {
 });
 
 test("awaiting_audit → audit_once", () => {
-  assert.equal(reconcileJob(job({ state: "awaiting_audit" })).kind, "audit_once");
+  assert.equal(
+    reconcileJob(job({ state: "awaiting_audit" }), {
+      baseIsAncestor: true,
+    }).kind,
+    "audit_once",
+  );
 });
 
 test("auditing with result file → audit_once", () => {
-  const a = reconcileJob(job({ state: "auditing" }), { auditResultReady: true });
+  const a = reconcileJob(job({ state: "auditing" }), {
+    auditResultReady: true,
+    baseIsAncestor: true,
+  });
   assert.equal(a.kind, "audit_once");
 });
 
 test("audit_passed → publish_once", () => {
-  assert.equal(reconcileJob(job({ state: "audit_passed" })).kind, "publish_once");
+  assert.equal(
+    reconcileJob(job({ state: "audit_passed" }), {
+      baseIsAncestor: true,
+    }).kind,
+    "publish_once",
+  );
 });
 
 test("publishing with existing PR → publish_once (ensure, not create)", () => {
-  const a = reconcileJob(job({ state: "publishing" }), { prExists: true });
+  const a = reconcileJob(job({ state: "publishing" }), {
+    prExists: true,
+    baseIsAncestor: true,
+  });
   assert.equal(a.kind, "publish_once");
 });
 
@@ -141,6 +160,7 @@ test("completed implementation without commits requires an explicit retry", () =
       worktreeExists: true,
       currentHeadSha: "base",
       hasCommitsSinceBase: false,
+      baseIsAncestor: true,
       trackedClean: false,
       implementTaskStatus: "completed",
     },
@@ -162,6 +182,7 @@ test("implementation retry requires a readable base HEAD and tracked status", ()
       worktreeExists: true,
       currentHeadSha: "base",
       hasCommitsSinceBase: false,
+      baseIsAncestor: true,
       implementTaskStatus: "completed",
     },
   ]) {
@@ -187,12 +208,86 @@ test("completed implementation with clean commits can be finalized", () => {
     {
       worktreeExists: true,
       hasCommitsSinceBase: true,
+      baseIsAncestor: true,
       trackedClean: true,
       implementTaskStatus: "completed",
     },
   );
 
   assert.equal(a.kind, "finalize_implement");
+});
+
+test("completed implementation with divergent HEAD cannot be finalized", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: true,
+      baseIsAncestor: false,
+      trackedClean: true,
+      implementTaskStatus: "completed",
+    },
+  );
+
+  assert.equal(a.kind, "blocked");
+  assert.match(a.reason, /not an ancestor/i);
+});
+
+test("recovery planning blocks divergent pre-publish states", () => {
+  for (const state of [
+    "implementing",
+    "reworking",
+    "awaiting_audit",
+    "auditing",
+    "audit_passed",
+    "publishing",
+  ] as const) {
+    const a = reconcileJob(job({ state }), {
+      baseIsAncestor: false,
+    });
+    assert.equal(a.kind, "blocked", state);
+    assert.match(a.reason, /not an ancestor/i, state);
+  }
+});
+
+test("recovery planning blocks unverified pre-publish lineage", () => {
+  for (const state of [
+    "implementing",
+    "reworking",
+    "awaiting_audit",
+    "auditing",
+    "audit_passed",
+    "publishing",
+  ] as const) {
+    const a = reconcileJob(job({ state }));
+    assert.equal(a.kind, "blocked", state);
+    assert.match(a.reason, /cannot verify.*ancestry/i, state);
+  }
+});
+
+test("recovery planning reports base ancestry errors before commit counts", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      currentHeadSha: "head",
+      hasCommitsSinceBase: false,
+      baseAncestryError: "fatal: bad object base",
+      trackedClean: true,
+      implementTaskStatus: "completed",
+    },
+  );
+
+  assert.equal(a.kind, "blocked");
+  assert.match(a.reason, /cannot verify.*bad object base/i);
 });
 
 test("premature completion stays blocked while its task is still live", () => {
@@ -227,6 +322,7 @@ test("blocked audit wait resumes when completed evidence is ready", () => {
     {
       auditResultReady: true,
       auditTaskStatus: "completed",
+      baseIsAncestor: true,
       trackedClean: true,
       currentHeadSha: "head",
     },
@@ -248,6 +344,7 @@ test("timed-out audit wait resumes when completed evidence is ready", () => {
     {
       auditResultReady: true,
       auditTaskStatus: "completed",
+      baseIsAncestor: true,
       trackedClean: true,
       currentHeadSha: "head",
     },
@@ -296,4 +393,5 @@ test("recovery invariants are documented", () => {
   assert.ok(inv.some((s) => s.includes("never claim a second")));
   assert.ok(inv.some((s) => s.includes("never create a second PR")));
   assert.ok(inv.some((s) => s.includes("never skip audit")));
+  assert.ok(inv.some((s) => s.includes("descend from the pinned base")));
 });

@@ -124,6 +124,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Routing | Pure `reconcileJob` → ensure* command | Testable without Orca |
 | Codex done / ledger stale | Exact Orca task `completed` plus commits since base ⇒ finalize without `worker_done` | Recover a lost completion message without advancing live or failed work |
 | Pi done / ledger stale | Reuse only a valid result for the exact base/HEAD when the same-round auditor task is completed | Crash recovery without accepting stale files |
+| Git lineage | Before implementation finalization, audit/rework, or publish, require the pinned `base_sha` to be an ancestor of the current HEAD; divergence or Git verification errors block | `base_sha..HEAD` can contain commits even when HEAD is on a sibling history |
 | Blocked audit wait | Known decision/timeout error + auditor task completed + current result + tracked clean ⇒ re-enter audit gate | Recover late evidence without accepting it directly |
 | PR create | Always find-by-head before create | No duplicate PR |
 | Worktree | Reuse by issue linkage / path | No duplicate worktree |

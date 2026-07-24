@@ -16,7 +16,7 @@ export type RecoverAction =
   | { kind: "audit_once"; reason: string }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
-  | { kind: "blocked"; reason: string }
+  | { kind: "blocked"; reason: string; persist?: boolean }
   | { kind: "none"; reason: string };
 
 export type ReconcileHints = {
@@ -24,6 +24,10 @@ export type ReconcileHints = {
   worktreeExists?: boolean;
   /** HEAD has commits since base_sha. */
   hasCommitsSinceBase?: boolean;
+  /** Whether base_sha is a verified ancestor of the current HEAD. */
+  baseIsAncestor?: boolean;
+  /** Git error when base ancestry could not be verified. */
+  baseAncestryError?: string;
   /** Current worktree HEAD SHA, when readable. */
   currentHeadSha?: string | null;
   /** Tracked working tree clean (-uno). */
@@ -49,6 +53,33 @@ export function reconcileJob(
     return {
       kind: "none",
       reason: "no active job; safe to pick/run-once for a new issue",
+    };
+  }
+
+  const requiresVerifiedBaseLineage =
+    job.state === "implementing" ||
+    job.state === "reworking" ||
+    job.state === "awaiting_audit" ||
+    job.state === "auditing" ||
+    job.state === "audit_passed" ||
+    job.state === "publishing";
+  const baseLineageError = hints.baseAncestryError
+    ? `cannot verify pinned base ancestry: ${hints.baseAncestryError}`
+    : hints.baseIsAncestor === false
+      ? "pinned base SHA is not an ancestor of HEAD"
+      : requiresVerifiedBaseLineage && hints.baseIsAncestor !== true
+        ? "cannot verify pinned base ancestry: verification result unavailable"
+        : null;
+  if (
+    baseLineageError &&
+    job.state !== "awaiting_merge" &&
+    job.state !== "merged" &&
+    job.state !== "cancelled"
+  ) {
+    return {
+      kind: "blocked",
+      reason: baseLineageError,
+      persist: job.state !== "blocked",
     };
   }
 
@@ -82,6 +113,7 @@ export function reconcileJob(
         implementationEnded &&
         implementTaskStatus === "completed" &&
         hints.hasCommitsSinceBase === true &&
+        hints.baseIsAncestor === true &&
         hints.trackedClean === true
       ) {
         return {
@@ -94,6 +126,7 @@ export function reconcileJob(
         implementationEnded &&
         hints.currentHeadSha === job.base_sha &&
         hints.hasCommitsSinceBase === false &&
+        hints.baseIsAncestor === true &&
         typeof hints.trackedClean === "boolean"
       ) {
         return {
@@ -109,6 +142,7 @@ export function reconcileJob(
         isRecoverableAuditWaitError(job.last_error) &&
         hints.auditResultReady === true &&
         hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
         hints.trackedClean === true
       ) {
         return {
@@ -242,6 +276,7 @@ export function recoveryInvariants(): string[] {
     "never claim a second issue while a non-terminal job exists",
     "never create a second worktree for the same issue if one exists",
     "never create a second PR for the same head branch if one exists",
+    "never advance work whose HEAD does not descend from the pinned base",
     "never skip audit (audit_passed/publishing only after audit gate)",
     "never pick next issue before merged/cancelled",
   ];

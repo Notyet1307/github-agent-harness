@@ -15,6 +15,7 @@ import {
   type GateDecision,
 } from "./audit-gate.js";
 import {
+  checkAncestor,
   currentBranch,
   git,
   logOnelineSince,
@@ -114,6 +115,38 @@ function auditOnceLocked(
       jobId: job.id,
       message: `job state ${job.state} is not ready for audit (need awaiting_audit|auditing|reworking)`,
     };
+  }
+  if (job.state === "reworking" && job.worktree_path && job.base_sha) {
+    const headSha = revParse(job.worktree_path, "HEAD");
+    if (!headSha) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: "cannot read rework HEAD for base ancestry",
+      });
+      return {
+        ok: false,
+        jobId: job.id,
+        message: "cannot read rework HEAD for base ancestry",
+      };
+    }
+    const ancestry = checkAncestor(
+      job.worktree_path,
+      job.base_sha,
+      headSha,
+    );
+    const error = !ancestry.ok
+      ? `cannot verify rework base ancestry: ${ancestry.error}`
+      : !ancestry.isAncestor
+        ? "rework HEAD is not a descendant of base SHA"
+        : null;
+    if (error) {
+      job = ledger.updateJob(job.id, {
+        state: "blocked",
+        last_error: error,
+        head_sha: headSha,
+      });
+      return { ok: false, jobId: job.id, message: error };
+    }
   }
 
   const repo = config.repositories.find((r) => r.github === job!.repo);
@@ -284,7 +317,12 @@ function runAuditPhase(
 
   const headSha = revParse(worktreePath, "HEAD");
   if (!headSha) {
-    return { ok: false, jobId: job.id, message: "cannot read HEAD" };
+    const error = "cannot read HEAD for audit";
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+    });
+    return { ok: false, jobId: job.id, message: error };
   }
   if (headSha === baseSha) {
     return {
@@ -292,6 +330,18 @@ function runAuditPhase(
       jobId: job.id,
       message: "HEAD equals base_sha; nothing to audit",
     };
+  }
+  const ancestry = checkAncestor(worktreePath, baseSha, headSha);
+  if (!ancestry.ok || !ancestry.isAncestor) {
+    const error = ancestry.ok
+      ? "audit HEAD is not a descendant of base SHA"
+      : `cannot verify audit base ancestry: ${ancestry.error}`;
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+      head_sha: headSha,
+    });
+    return { ok: false, jobId: job.id, message: error };
   }
 
   const resultPath = join(worktreePath, ".harness", "audit-result.json");
@@ -687,19 +737,18 @@ function runReworkPhase(
         error: "rework produced no commits after audited HEAD",
       };
     }
-    const ancestry = git(worktreePath, [
-      "merge-base",
-      "--is-ancestor",
+    const ancestry = checkAncestor(
+      worktreePath,
       auditHeadSha,
       headSha,
-    ]);
-    if (!ancestry.ok && ancestry.stderr) {
+    );
+    if (!ancestry.ok) {
       return {
         ok: false,
-        error: `cannot verify rework ancestry: ${ancestry.stderr}`,
+        error: `cannot verify rework ancestry: ${ancestry.error}`,
       };
     }
-    if (!ancestry.ok) {
+    if (!ancestry.isAncestor) {
       return {
         ok: false,
         error: "rework HEAD is not a descendant of audited HEAD",

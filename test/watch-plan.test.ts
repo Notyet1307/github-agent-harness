@@ -17,6 +17,15 @@ test("blocked → blocked_wait (do not claim next)", () => {
   assert.equal(p.step, "blocked_wait");
 });
 
+test("a newly detected block is persisted before waiting", () => {
+  const p = planWatchCycle({
+    kind: "blocked",
+    reason: "pinned base ancestry is unknown",
+    persist: true,
+  });
+  assert.equal(p.step, "resume");
+});
+
 test("implementation retry waits for explicit recover execution", () => {
   const p = planWatchCycle({
     kind: "retry_implement",

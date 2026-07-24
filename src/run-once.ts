@@ -7,6 +7,7 @@ import {
 } from "./config.js";
 import { trackedDirty } from "./audit-gate.js";
 import {
+  checkAncestor,
   commitCountSince,
   currentBranch,
   ensureBranch,
@@ -204,6 +205,14 @@ function runOnceLocked(
         if (!baseSha || !headSha || !tracked?.ok) {
           const error =
             "implementation recovery revalidation failed: unreadable base, HEAD, or tracked status";
+          job = ledger.updateJob(job.id, { last_error: error });
+          return { ok: false, jobId: job.id, message: error };
+        }
+        const ancestry = checkAncestor(worktreePath!, baseSha, headSha);
+        if (!ancestry.ok || !ancestry.isAncestor) {
+          const error = ancestry.ok
+            ? "implementation recovery HEAD is not a descendant of base SHA"
+            : `cannot verify implementation recovery ancestry: ${ancestry.error}`;
           job = ledger.updateJob(job.id, { last_error: error });
           return { ok: false, jobId: job.id, message: error };
         }
@@ -824,6 +833,25 @@ function runOnceLocked(
       last_error: "cannot read HEAD after implement",
     });
     return { ok: false, jobId: job.id, message: "cannot read HEAD" };
+  }
+
+  const ancestry = checkAncestor(worktreePath, baseSha, headSha);
+  if (!ancestry.ok || !ancestry.isAncestor) {
+    const error = ancestry.ok
+      ? "implementation HEAD is not a descendant of base SHA"
+      : `cannot verify implementation ancestry: ${ancestry.error}`;
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: error,
+      head_sha: headSha,
+    });
+    setWorktreeProgress(
+      orcaCli,
+      job.worktree_id!,
+      `harness: blocked — ${error}`,
+      "in-progress",
+    );
+    return { ok: false, jobId: job.id, message: error };
   }
 
   const commits = commitCountSince(worktreePath, baseSha);

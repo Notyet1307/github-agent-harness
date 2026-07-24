@@ -3,13 +3,14 @@ import {
   defaultLockPath,
   loadConfig,
 } from "./config.js";
+import { trackedDirty } from "./audit-gate.js";
 import { execFile } from "./exec.js";
 import {
   findPrByHead,
   issueStillClaimable,
   viewPullRequest,
 } from "./github.js";
-import { revParse, statusPorcelain } from "./git.js";
+import { checkAncestor, revParse, statusPorcelain } from "./git.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
@@ -97,7 +98,47 @@ function publishOnceLocked(
   const worktreePath = job.worktree_path;
   const worktreeId = job.worktree_id;
   const branch = job.branch;
+  const baseSha = job.base_sha;
   let headSha = job.head_sha;
+
+  // 1) Integrity checks
+  const head = revParse(worktreePath, "HEAD");
+  if (!head) {
+    return block(ledger, job, "cannot read HEAD before publish");
+  }
+  if (head !== headSha && !shaPrefixMatch(head, headSha)) {
+    return block(
+      ledger,
+      job,
+      `HEAD ${head} != audited head ${headSha}; re-run audit-once`,
+    );
+  }
+  const ancestry = checkAncestor(worktreePath, baseSha, head);
+  if (!ancestry.ok || !ancestry.isAncestor) {
+    return block(
+      ledger,
+      job,
+      ancestry.ok
+        ? "publish HEAD is not a descendant of base SHA"
+        : `cannot verify publish base ancestry: ${ancestry.error}`,
+    );
+  }
+  // refresh head if prefix match only
+  if (head !== headSha) {
+    headSha = head;
+    job = ledger.updateJob(job.id, { head_sha: head });
+  }
+
+  const dirty = statusPorcelain(worktreePath);
+  // allow untracked .pi/.harness; block tracked mods
+  const tracked = trackedDirty(worktreePath);
+  if (tracked) {
+    return block(
+      ledger,
+      job,
+      `tracked files dirty or unreadable before publish:\n${tracked}`,
+    );
+  }
 
   const orcaCli = requireOrcaCli(config);
   const st = orcaStatus(orcaCli);
@@ -112,41 +153,6 @@ function publishOnceLocked(
     "harness: publishing PR",
     "in-review",
   );
-
-  // 1) Integrity checks
-  const head = revParse(worktreePath, "HEAD");
-  if (!head) {
-    return block(ledger, job, "cannot read HEAD before publish");
-  }
-  if (head !== headSha && !shaPrefixMatch(head, headSha)) {
-    return block(
-      ledger,
-      job,
-      `HEAD ${head} != audited head ${headSha}; re-run audit-once`,
-    );
-  }
-  // refresh head if prefix match only
-  if (head !== headSha) {
-    headSha = head;
-    job = ledger.updateJob(job.id, { head_sha: head });
-  }
-
-  const dirty = statusPorcelain(worktreePath);
-  // allow untracked .pi/.harness; block tracked mods
-  const tracked = execFile("git", [
-    "-C",
-    worktreePath,
-    "status",
-    "--porcelain",
-    "-uno",
-  ]);
-  if (tracked.ok && tracked.stdout.trim()) {
-    return block(
-      ledger,
-      job,
-      `tracked dirty before publish:\n${tracked.stdout.trim()}`,
-    );
-  }
 
   const claimable = issueStillClaimable(
     repo,

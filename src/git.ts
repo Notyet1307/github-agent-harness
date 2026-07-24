@@ -89,6 +89,32 @@ export function commitCountSince(cwd: string, baseSha: string): number {
   return Number(r.stdout) || 0;
 }
 
+export function checkAncestor(
+  cwd: string,
+  ancestor: string,
+  descendant: string,
+):
+  | { ok: true; isAncestor: boolean }
+  | { ok: false; error: string } {
+  const result = execFile("git", [
+    "-C",
+    cwd,
+    "merge-base",
+    "--is-ancestor",
+    ancestor,
+    descendant,
+  ]);
+  if (result.code === 0) return { ok: true, isAncestor: true };
+  if (result.code === 1) return { ok: true, isAncestor: false };
+  return {
+    ok: false,
+    error:
+      result.stderr.trim() ||
+      result.error ||
+      `git merge-base exited ${result.code ?? "without a status"}`,
+  };
+}
+
 export function logOnelineSince(cwd: string, baseSha: string): string[] {
   const r = git(cwd, ["log", `${baseSha}..HEAD`, "--oneline"]);
   if (!r.ok || !r.stdout) return [];

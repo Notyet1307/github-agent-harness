@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditOnce } from "../src/audit-once.js";
 import { Ledger } from "../src/ledger.js";
+import { publishOnce } from "../src/publisher.js";
 import type { AuditResult } from "../src/types.js";
 
 type AuditFixture = {
@@ -79,6 +81,180 @@ test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) =>
   );
   assert.equal(verified.getJob("job-audit")?.auditor_dispatch_id, null);
   assert.equal(verified.getJob("job-audit")?.dispatch_attempt, 1);
+  verified.close();
+});
+
+test("audit blocks a HEAD that diverged from the pinned base", (t) => {
+  const fixture = createAuditFixture(() => null);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const divergentHead = resetToUnrelatedCommit(
+    fixture.worktree,
+    "divergent implementation",
+  );
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "awaiting_audit",
+    base_sha: fixture.baseSha,
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: divergentHead,
+  });
+  ledger.close();
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /not a descendant of base/i);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
+test("audit blocks when HEAD cannot be read", (t) => {
+  const fixture = createAuditFixture(() => null);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "awaiting_audit",
+    base_sha: fixture.baseSha,
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: fixture.headSha,
+  });
+  ledger.close();
+  git(fixture.worktree, "update-ref", "-d", "refs/heads/main");
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /cannot read HEAD/i);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.match(verified.getJob("job-audit")?.last_error ?? "", /cannot read HEAD/i);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
+test("rework blocks a divergent HEAD before creating a task", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-commit",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture, false);
+
+  const divergentHead = resetToUnrelatedCommit(
+    fixture.worktree,
+    "divergent rework base",
+  );
+  const divergentLedger = new Ledger(fixture.ledgerPath);
+  divergentLedger.updateJob("job-audit", {
+    head_sha: divergentHead,
+    audit_head_sha: divergentHead,
+    audit_result_json: JSON.stringify(
+      actionableAuditFailure(fixture.baseSha, divergentHead),
+    ),
+  });
+  divergentLedger.close();
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /not a descendant of base/i);
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
+test("publish blocks a HEAD that diverged from the pinned base", (t) => {
+  const fixture = createAuditFixture(() => null);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const divergentHead = resetToUnrelatedCommit(
+    fixture.worktree,
+    "divergent audited head",
+  );
+  const recordedHead = divergentHead.slice(0, 12);
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "audit_passed",
+    base_sha: fixture.baseSha,
+    branch: "main",
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: recordedHead,
+  });
+  ledger.close();
+
+  const { result, ghCalled } = publishWithForbiddenGh(fixture);
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /not a descendant of base/i);
+  assert.equal(ghCalled, false);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.head_sha, recordedHead);
+  verified.close();
+});
+
+test("publish blocks when tracked status cannot be read", (t) => {
+  const fixture = createAuditFixture(() => null);
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "audit_passed",
+    base_sha: fixture.baseSha,
+    branch: "main",
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: fixture.headSha,
+  });
+  ledger.close();
+  writeFileSync(join(fixture.worktree, ".git", "index"), "broken index");
+
+  const { result, ghCalled } = publishWithForbiddenGh(fixture);
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /tracked files dirty or unreadable/i);
+  assert.equal(ghCalled, false);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
   verified.close();
 });
 
@@ -1246,6 +1422,46 @@ function isReworkCreation(args: string[]): boolean {
     (args[0] === "terminal" && args[1] === "create") ||
     (args[0] === "orchestration" && args[1] === "task-create")
   );
+}
+
+function resetToUnrelatedCommit(worktree: string, message: string): string {
+  const tree = git(worktree, "rev-parse", "HEAD^{tree}");
+  const head = git(worktree, "commit-tree", tree, "-m", message);
+  git(worktree, "reset", "--hard", head);
+  return head;
+}
+
+function publishWithForbiddenGh(fixture: AuditFixture): {
+  result: ReturnType<typeof publishOnce>;
+  ghCalled: boolean;
+} {
+  const binDir = join(fixture.dir, "bin");
+  const marker = join(fixture.dir, "gh-called");
+  mkdirSync(binDir);
+  const fakeGh = join(binDir, "gh");
+  writeFileSync(
+    fakeGh,
+    `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(marker)}, "called");
+process.exitCode = 1;
+`,
+  );
+  chmodSync(fakeGh, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+  try {
+    return {
+      result: publishOnce({
+        configPath: fixture.configPath,
+        ledgerPath: fixture.ledgerPath,
+        lockPath: join(fixture.dir, "harness.lock"),
+      }),
+      ghCalled: existsSync(marker),
+    };
+  } finally {
+    process.env.PATH = originalPath;
+  }
 }
 
 function git(cwd: string, ...args: string[]): string {

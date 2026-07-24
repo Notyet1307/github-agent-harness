@@ -9,7 +9,7 @@ import {
   defaultLockPath,
   loadConfig,
 } from "./config.js";
-import { commitCountSince, revParse } from "./git.js";
+import { checkAncestor, commitCountSince, revParse } from "./git.js";
 import { execFile } from "./exec.js";
 import {
   findPrByHead,
@@ -78,9 +78,52 @@ export function recover(options: {
       return base;
     }
     if (action.kind === "blocked") {
+      if (action.persist && job && job.state !== "blocked") {
+        const blocked = ledger.updateJob(job.id, {
+          state: "blocked",
+          last_error: action.reason,
+        });
+        return {
+          ...base,
+          ok: false,
+          message: action.reason,
+          details: { ...base.details, state: blocked.state },
+          executed: true,
+        };
+      }
       return { ...base, ok: false, message: action.reason };
     }
     if (job?.state === "blocked" && action.kind === "audit_once") {
+      const head = job.worktree_path
+        ? revParse(job.worktree_path, "HEAD")
+        : null;
+      let ancestryError: string | null = null;
+      if (!job.worktree_path || !job.base_sha || !head) {
+        ancestryError =
+          "cannot verify blocked audit recovery ancestry: unreadable worktree, base, or HEAD";
+      } else {
+        const ancestry = checkAncestor(
+          job.worktree_path,
+          job.base_sha,
+          head,
+        );
+        ancestryError = !ancestry.ok
+          ? `cannot verify blocked audit recovery ancestry: ${ancestry.error}`
+          : !ancestry.isAncestor
+            ? "blocked audit recovery HEAD is not a descendant of base SHA"
+            : null;
+      }
+      if (ancestryError) {
+        ledger.updateJob(job.id, {
+          state: "blocked",
+          last_error: ancestryError,
+        });
+        return {
+          ...base,
+          ok: false,
+          message: ancestryError,
+        };
+      }
       ledger.updateJob(job.id, {
         state: "auditing",
         last_error: null,
@@ -238,6 +281,18 @@ function gatherHints(
     if (hints.worktreeExists && job.base_sha) {
       const head = revParse(job.worktree_path, "HEAD");
       hints.currentHeadSha = head;
+      if (head) {
+        const ancestry = checkAncestor(
+          job.worktree_path,
+          job.base_sha,
+          head,
+        );
+        if (ancestry.ok) {
+          hints.baseIsAncestor = ancestry.isAncestor;
+        } else {
+          hints.baseAncestryError = ancestry.error;
+        }
+      }
       hints.hasCommitsSinceBase =
         Boolean(head) &&
         head !== job.base_sha &&

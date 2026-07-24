@@ -38,27 +38,41 @@ const stages: Array<{
   {
     name: "codex mid-flight",
     state: "implementing",
-    hints: { hasCommitsSinceBase: false },
+    hints: { hasCommitsSinceBase: false, baseIsAncestor: true },
     expect: "run_once",
   },
   {
     name: "codex done ledger stale",
     state: "implementing",
-    hints: { hasCommitsSinceBase: true, trackedClean: true },
+    hints: {
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+    },
     expect: "run_once",
   },
-  { name: "ready for pi", state: "awaiting_audit", expect: "audit_once" },
+  {
+    name: "ready for pi",
+    state: "awaiting_audit",
+    hints: { baseIsAncestor: true },
+    expect: "audit_once",
+  },
   {
     name: "pi mid / result on disk",
     state: "auditing",
-    hints: { auditResultReady: true },
+    hints: { auditResultReady: true, baseIsAncestor: true },
     expect: "audit_once",
   },
-  { name: "audit passed", state: "audit_passed", expect: "publish_once" },
+  {
+    name: "audit passed",
+    state: "audit_passed",
+    hints: { baseIsAncestor: true },
+    expect: "publish_once",
+  },
   {
     name: "push done PR exists",
     state: "publishing",
-    hints: { prExists: true },
+    hints: { prExists: true, baseIsAncestor: true },
     expect: "publish_once",
   },
   {
@@ -208,6 +222,20 @@ if (args[0] === "status") {
     runtime: { state: "ready", reachable: true }
   } }));
 } else if (key === "orchestration task-list") {
+  if (mode === "diverge-after-hints") {
+    const tree = execFileSync(
+      "git",
+      ["-C", ${JSON.stringify(worktree)}, "rev-parse", "HEAD^{tree}"],
+      { encoding: "utf8" },
+    ).trim();
+    const head = execFileSync(
+      "git",
+      ["-C", ${JSON.stringify(worktree)}, "commit-tree", tree, "-m", "diverged after hints"],
+      { encoding: "utf8" },
+    ).trim();
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "reset", "--hard", head]);
+    writeFileSync(join(dirname(process.argv[1]), "mode"), "success");
+  }
   if (mode === "dirty-after-hints") {
     writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "dirty after hints\\n");
   }
@@ -543,6 +571,122 @@ repositories:
     ).length,
     taskCreatesBefore,
   );
+
+  const tree = git(worktree, "rev-parse", "HEAD^{tree}");
+  const divergentHead = git(
+    worktree,
+    "commit-tree",
+    tree,
+    "-m",
+    "divergent implementation",
+  );
+  git(worktree, "reset", "--hard", divergentHead);
+  const divergentLedger = new Ledger(ledgerPath);
+  divergentLedger.updateJob("job-retry", {
+    state: "blocked",
+    head_sha: divergentHead,
+    implementer_task_id: "task-old",
+    implementer_dispatch_id: "dispatch-old",
+    last_error: IMPLEMENT_NO_COMMITS_ERROR,
+  });
+  divergentLedger.close();
+
+  const divergentPlan = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: true,
+  });
+
+  assert.equal(divergentPlan.action.kind, "blocked");
+  assert.equal(divergentPlan.executed, false);
+  assert.match(divergentPlan.message, /not an ancestor/i);
+
+  const divergentResult = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+  assert.equal(divergentResult.ok, false);
+  assert.equal(divergentResult.action.kind, "blocked");
+  assert.equal(divergentResult.executed, false);
+  const blockedDivergence = new Ledger(ledgerPath);
+  assert.equal(blockedDivergence.getJob("job-retry")?.state, "blocked");
+  blockedDivergence.close();
+
+  git(worktree, "reset", "--hard", baseSha);
+  writeFileSync(join(worktree, "value.txt"), "race\n");
+  git(worktree, "add", "value.txt");
+  git(worktree, "commit", "-m", "valid implementation before recovery");
+  const raceHead = git(worktree, "rev-parse", "HEAD");
+  const raceLedger = new Ledger(ledgerPath);
+  raceLedger.updateJob("job-retry", {
+    state: "blocked",
+    head_sha: raceHead,
+    implementer_task_id: "task-old",
+    implementer_dispatch_id: "dispatch-old",
+    last_error: IMPLEMENT_NO_COMMITS_ERROR,
+  });
+  raceLedger.close();
+  writeFileSync(modePath, "diverge-after-hints");
+  const terminalListsBeforeRace =
+    readFileSync(callsPath, "utf8").match(/\["terminal","list"/g)?.length ?? 0;
+
+  const raced = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(raced.action.kind, "finalize_implement");
+  assert.equal(raced.executed, true);
+  assert.equal(raced.ok, false);
+  assert.match(raced.message, /not a descendant/i);
+  const terminalListsAfterRace =
+    readFileSync(callsPath, "utf8").match(/\["terminal","list"/g)?.length ?? 0;
+  assert.equal(terminalListsAfterRace, terminalListsBeforeRace);
+  const racedLedger = new Ledger(ledgerPath);
+  assert.equal(racedLedger.getJob("job-retry")?.state, "blocked");
+  racedLedger.close();
+
+  const unreadableLedger = new Ledger(ledgerPath);
+  unreadableLedger.updateJob("job-retry", {
+    state: "awaiting_audit",
+    last_error: null,
+  });
+  unreadableLedger.close();
+  git(worktree, "update-ref", "-d", "refs/heads/main");
+
+  const unreadablePlan = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: true,
+  });
+  assert.equal(unreadablePlan.action.kind, "blocked");
+  assert.equal(unreadablePlan.executed, false);
+  assert.match(unreadablePlan.message, /cannot verify.*ancestry/i);
+  const afterDryRun = new Ledger(ledgerPath);
+  assert.equal(afterDryRun.getJob("job-retry")?.state, "awaiting_audit");
+  afterDryRun.close();
+
+  const unreadableResult = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+  assert.equal(unreadableResult.action.kind, "blocked");
+  assert.equal(unreadableResult.executed, true);
+  const persistedBlock = new Ledger(ledgerPath);
+  assert.equal(persistedBlock.getJob("job-retry")?.state, "blocked");
+  assert.match(
+    persistedBlock.getJob("job-retry")?.last_error ?? "",
+    /cannot verify.*ancestry/i,
+  );
+  persistedBlock.close();
 });
 
 test("recover executes a completed blocked audit result through the gate", (t) => {
@@ -587,17 +731,43 @@ test("recover executes a completed blocked audit result through the gate", (t) =
   );
 
   const fakeOrca = join(dir, "orca.cjs");
+  const modePath = join(dir, "audit-mode");
+  writeFileSync(modePath, "success");
   writeFileSync(
     fakeOrca,
     `#!/usr/bin/env node
+const { readFileSync, writeFileSync } = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const args = process.argv.slice(2).filter((arg) => arg !== "--json");
+const mode = readFileSync(${JSON.stringify(modePath)}, "utf8");
 const key = args.slice(0, 2).join(" ");
 if (args[0] === "status") {
+  if (mode === "fail-status") {
+    console.log(JSON.stringify({ ok: false, error: {
+      message: "audit runtime unavailable"
+    } }));
+    process.exitCode = 1;
+    return;
+  }
   console.log(JSON.stringify({ ok: true, result: {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
 } else if (key === "orchestration task-list") {
+  if (mode === "diverge-after-hints") {
+    const tree = execFileSync(
+      "git",
+      ["-C", ${JSON.stringify(worktree)}, "rev-parse", "HEAD^{tree}"],
+      { encoding: "utf8" },
+    ).trim();
+    const head = execFileSync(
+      "git",
+      ["-C", ${JSON.stringify(worktree)}, "commit-tree", tree, "-m", "diverged after audit hints"],
+      { encoding: "utf8" },
+    ).trim();
+    execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "reset", "--hard", head]);
+    writeFileSync(${JSON.stringify(modePath)}, "fail-status");
+  }
   console.log(JSON.stringify({ ok: true, result: {
     tasks: [{ id: "task-audit", status: "completed" }]
   } }));
@@ -705,6 +875,36 @@ repositories:
   const verified = new Ledger(ledgerPath);
   assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
   verified.close();
+
+  const raceLedger = new Ledger(ledgerPath);
+  raceLedger.updateJob("job-audit", {
+    state: "blocked",
+    audit_head_sha: headSha,
+    head_sha: headSha,
+    last_error:
+      "worker raised decision_gate (unsupported in M2 auto path)",
+  });
+  raceLedger.close();
+  writeFileSync(modePath, "diverge-after-hints");
+
+  const raced = recover({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(raced.action.kind, "audit_once");
+  assert.equal(raced.executed, false);
+  assert.equal(raced.ok, false);
+  assert.match(raced.message, /not a descendant/i);
+  const raceVerified = new Ledger(ledgerPath);
+  assert.equal(raceVerified.getJob("job-audit")?.state, "blocked");
+  assert.match(
+    raceVerified.getJob("job-audit")?.last_error ?? "",
+    /not a descendant/i,
+  );
+  raceVerified.close();
 });
 
 function git(cwd: string, ...args: string[]): string {

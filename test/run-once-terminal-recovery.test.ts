@@ -24,6 +24,7 @@ type FixtureMode =
   | "working"
   | "failed"
   | "late-failed"
+  | "diverged"
   | "dirty"
   | "missing";
 
@@ -49,11 +50,23 @@ function createFixture(mode: FixtureMode): {
     mode === "accepted" ||
     mode === "working" ||
     mode === "failed" ||
+    mode === "diverged" ||
     mode === "dirty"
   ) {
     writeFileSync(join(worktree, "value.txt"), "existing fix\n");
     git(worktree, "add", "value.txt");
     git(worktree, "commit", "-m", "existing fix");
+    if (mode === "diverged") {
+      const tree = git(worktree, "rev-parse", "HEAD^{tree}");
+      const divergentHead = git(
+        worktree,
+        "commit-tree",
+        tree,
+        "-m",
+        "divergent fix",
+      );
+      git(worktree, "reset", "--hard", divergentHead);
+    }
     if (mode === "dirty") {
       writeFileSync(join(worktree, "value.txt"), "dirty fix\n");
     }
@@ -257,6 +270,7 @@ repositories:
     mode === "working" ||
     mode === "failed" ||
     mode === "late-failed" ||
+    mode === "diverged" ||
     mode === "dirty";
   ledger.updateJob("job-terminal", {
     state: hasTask ? "implementing" : "worktree_ready",
@@ -570,6 +584,23 @@ test("runOnce does not finalize completed task commits when tracked files are di
     ),
     false,
   );
+});
+
+test("runOnce blocks a completed task whose HEAD diverged from base", (t) => {
+  const fixture = createFixture("diverged");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /not a descendant of base/i);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
 });
 
 function readCalls(path: string): string[][] {

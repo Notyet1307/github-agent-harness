@@ -40,6 +40,18 @@ export function planWatchCycle(action: RecoverAction): WatchCyclePlan {
         reason: action.reason,
       };
     case "blocked":
+      if (action.persist) {
+        return {
+          step: "resume",
+          action,
+          reason: `record newly detected block: ${action.reason}`,
+        };
+      }
+      return {
+        step: "blocked_wait",
+        action,
+        reason: `blocked job holds the slot: ${action.reason}`,
+      };
     case "retry_implement":
       return {
         step: "blocked_wait",
