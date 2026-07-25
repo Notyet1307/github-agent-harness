@@ -1,5 +1,5 @@
 import { execFile } from "./exec.js";
-import type { IssueCandidate, RepoConfig } from "./types.js";
+import type { IssueCandidate, IssueReference, RepoConfig } from "./types.js";
 
 export type PullRequestView = {
   number: number;
@@ -20,6 +20,13 @@ export type PullRequestView = {
   baseRefName?: string;
 };
 
+type GhIssueConnection =
+  | IssueReference[]
+  | {
+      nodes?: IssueReference[];
+      totalCount?: number;
+    };
+
 type GhIssueJson = {
   number: number;
   title: string;
@@ -27,12 +34,15 @@ type GhIssueJson = {
   updatedAt: string;
   state?: string;
   labels?: Array<string | { name: string }>;
-  blockedBy?:
-    | Array<{ number: number; title?: string; state?: string }>
-    | {
-        nodes?: Array<{ number: number; title?: string; state?: string }>;
-        totalCount?: number;
-      };
+  blockedBy?: GhIssueConnection;
+  subIssues?: GhIssueConnection;
+  subIssuesSummary?: {
+    completed?: number;
+    percentCompleted?: number;
+    total?: number;
+  };
+  assignees?: Array<string | { login: string }>;
+  parent?: IssueReference | null;
 };
 
 export function ghAuthOk(): { ok: boolean; detail: string } {
@@ -64,7 +74,7 @@ export function listReadyIssues(
     "--limit",
     "50",
     "--json",
-    "number,title,url,updatedAt,labels,blockedBy,state",
+    "number,title,url,updatedAt,labels,blockedBy,state,parent,subIssues,subIssuesSummary,assignees",
   ]);
 
   if (!result.ok) {
@@ -104,7 +114,7 @@ export function viewIssue(
     "--repo",
     repo.github,
     "--json",
-    "number,title,url,updatedAt,labels,blockedBy,state",
+    "number,title,url,updatedAt,labels,blockedBy,state,parent,subIssues,subIssuesSummary,assignees",
   ]);
   if (!result.ok) {
     return {
@@ -131,7 +141,11 @@ function normalizeIssue(raw: GhIssueJson): IssueCandidate {
   const labels = (raw.labels ?? []).map((l) =>
     typeof l === "string" ? l : l.name,
   );
-  const blockedBy = normalizeBlockedBy(raw.blockedBy);
+  const blockedBy = normalizeIssueConnection(raw.blockedBy);
+  const subIssues = normalizeIssueConnection(raw.subIssues);
+  const assignees = (raw.assignees ?? []).map((a) =>
+    typeof a === "string" ? a : a.login,
+  );
   return {
     number: raw.number,
     title: raw.title,
@@ -139,15 +153,19 @@ function normalizeIssue(raw: GhIssueJson): IssueCandidate {
     updatedAt: raw.updatedAt,
     labels,
     blockedBy,
+    subIssues,
+    subIssuesTotal: raw.subIssuesSummary?.total ?? subIssues.length,
+    assignees,
+    parent: raw.parent ?? null,
   };
 }
 
-function normalizeBlockedBy(
-  blockedBy: GhIssueJson["blockedBy"],
-): Array<{ number: number; title?: string; state?: string }> {
-  if (!blockedBy) return [];
-  if (Array.isArray(blockedBy)) return blockedBy;
-  return blockedBy.nodes ?? [];
+function normalizeIssueConnection(
+  connection: GhIssueConnection | undefined,
+): IssueReference[] {
+  if (!connection) return [];
+  if (Array.isArray(connection)) return connection;
+  return connection.nodes ?? [];
 }
 
 /** Issue still open, has ready label, not blocked. */

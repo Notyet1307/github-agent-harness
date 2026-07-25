@@ -61,14 +61,30 @@ export type HarnessConfig = {
   repositories: RepoConfig[];
 };
 
+export type IssueReference = {
+  number: number;
+  title?: string;
+  state?: string;
+};
+
 export type IssueCandidate = {
   number: number;
   title: string;
   url: string;
   updatedAt: string;
   /** Dependency blockers; may include closed issues from GitHub JSON. */
-  blockedBy: Array<{ number: number; title?: string; state?: string }>;
+  blockedBy: IssueReference[];
   labels: string[];
+  /** Ordered GitHub sub-issues when this candidate is a Wayfinder map. */
+  subIssues?: IssueReference[];
+  /** Total reported by GitHub; differs from subIssues.length if truncated. */
+  subIssuesTotal?: number;
+  /** GitHub logins already assigned to the issue. */
+  assignees?: string[];
+  /** Parent relation when exposed by the installed gh version. */
+  parent?: IssueReference | null;
+  /** Selection provenance: this issue is the frontier of this map. */
+  mapNumber?: number;
 };
 
 /** True only if blocked by at least one still-OPEN issue. */
@@ -84,6 +100,10 @@ export function hasOpenBlockers(
 export type PickSkipReason =
   | "no-ready-label"
   | "blocked"
+  | "assigned"
+  | "map-container"
+  | "parented-child"
+  | "unsupported-topology"
   | "already-in-ledger"
   | "not-open"
   | "other";

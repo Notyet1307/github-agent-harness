@@ -47,6 +47,28 @@ The main configuration is
 passing `doctor` result and use the dry-run picker to verify the issue that
 would be claimed.
 
+## Wayfinder Map selection
+
+A ready-labeled issue with GitHub sub-issues is a Wayfinder Map container, not
+an executable task. The picker keeps top-level issues ordered by issue number,
+but replaces each Map with at most one frontier child selected in the original
+GitHub sub-issue order. A child must be open, carry `issueLabel`, have no open
+blocker or assignee, and not already be in the ledger. Parented children are
+considered only through their Map, so issue-number sorting cannot bypass Map
+order.
+
+The Map and executable children must be present in the ready-labeled snapshot.
+An open child encountered before a winner but missing the ready label closes
+that Map's frontier for the poll; incomplete, conflicting, or nested topology
+also fails closed. A Map with no frontier does not block an unrelated
+standalone issue or later Map.
+
+This support is selection-only: the controller does not add assignees, mutate
+labels, resolve children, or close a completed Map. `run-once --issue N` asserts
+that `N` is the current picker winner; it never overrides Map order or gates.
+Only one Map level and native GitHub sub-issues are supported; task-list body
+fallbacks and nested Maps are out of scope.
+
 ## Operating modes
 
 ### Manual one-shot commands
