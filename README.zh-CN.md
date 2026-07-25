@@ -43,6 +43,23 @@ pnpm test
 主配置位于 [`config/harness.yaml`](config/harness.yaml)。开始真实任务前，应确保
 `doctor` 为 PASS，并先用 dry-run 核对将被领取的 issue。
 
+## Wayfinder Map 选择
+
+带 ready 标签且拥有 GitHub sub-issues 的 issue 是 Wayfinder Map 容器，不是可执行
+任务。Picker 仍按父级 issue 编号排列顶层候选，但每张 Map 最多只贡献一个 frontier
+child；child 严格按 GitHub 原生 sub-issue 顺序选择，且必须处于 OPEN、带
+`issueLabel`、没有开放 blocker、没有 assignee，并且尚未进入 ledger。有 parent 的
+child 只能经所属 Map 参与选择，不能依靠自身编号绕过 Map 顺序。
+
+Map 和可执行 child 都必须出现在 ready 标签快照中。在 winner 之前遇到的 OPEN child
+若没有 ready 标签，该 Map 在本轮没有 frontier；关系不完整、冲突或出现嵌套 Map
+时同样 fail closed。没有 frontier 的 Map 不会阻止无关 standalone issue 或后续 Map。
+
+该能力只负责选择：controller 不添加 assignee、不修改标签、不 resolve child，也不
+自动关闭已完成的 Map。`run-once --issue N` 只是断言 N 是当前 Picker winner，不能
+覆盖 Map 顺序或 gate。当前只支持一层 GitHub 原生 sub-issues，不支持正文 task-list
+fallback 或嵌套 Map。
+
 ## 运行方式
 
 ### 分阶段命令

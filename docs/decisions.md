@@ -175,3 +175,16 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Escalation | Always block even when valid commits exist | Explicit worker requests must not be hidden by Git fallback |
 | Implementer terminal recovery | Reuse only one connected exact role-title match; otherwise create a fresh terminal before a new or pending dispatch | Orca restarts invalidate handles, while fuzzy or ambiguous matches can target another session |
 | No-commit completion recovery | Require readable HEAD at the pinned base; preserve the worktree and redispatch only via explicit `recover --execute` | Keep partial changes without letting failed retries or `watch` create retry loops |
+
+## 2026-07-25 — Wayfinder Map frontier selection
+
+| Decision | Choice | Why |
+|---|---|---|
+| Scope | Selection-only, one native GitHub sub-issue level | Fix Map mis-selection without adding a second GitHub lifecycle controller |
+| Map identity | A ready issue with sub-issues is a container and is never claimed | Parent specs coordinate work; children are executable tickets |
+| Ordering | Top-level issue number, then native sub-issue order within each Map | Preserve existing repository ordering while honoring Wayfinder map order |
+| Frontier gate | OPEN child with the ready label, no open blocker, no assignee, and no ledger entry | Combine the controller's authorization label with Wayfinder availability rules |
+| Parented children | Consider only through the owning Map | Prevent issue-number sorting or `--issue` from bypassing Map order |
+| Missing or conflicting topology | Fail the affected Map closed; continue unrelated top-level candidates | Do not guess through incomplete relationships or block independent work |
+| GitHub mutations | No automatic assign, label changes, child resolution, or Map close | SQLite remains the controller claim source; humans own tracker lifecycle |
+| Unsupported | Nested Maps and task-list body fallbacks | Keep the first implementation bounded to the verified native sub-issue shape |

@@ -97,9 +97,10 @@ function main(argv: string[]): number {
           `WOULD CLAIM: #${result.selected.number} ${result.selected.title}\n`,
         );
         process.stdout.write(`  url: ${result.selected.url}\n`);
-        process.stdout.write(
-          `  why: open + label '${config.issueLabel}' + blockedBy empty + not in ledger\n`,
-        );
+        const why = result.selected.mapNumber
+          ? `frontier of Map #${result.selected.mapNumber} + open + label '${config.issueLabel}' + blockedBy empty + unassigned + not in ledger`
+          : `open + label '${config.issueLabel}' + blockedBy empty + not in ledger`;
+        process.stdout.write(`  why: ${why}\n`);
         process.stdout.write(
           `  implementer profile: ${config.activeProfiles.implementer}\n`,
         );
