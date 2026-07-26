@@ -51,8 +51,8 @@ agentProfiles:
     invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA. Use only the controller-owned harness-reviewer in user scope."
 
 repositories:
-  - github: Notyet1307/harness-sandbox
-    localPath: /Users/yang/harness-sandbox
-    orcaRepoId: 8111723c-f78d-419c-b2c4-0150f4374451
+  - github: Notyet1307/Exposure-Agent
+    localPath: /Users/yang/Test-drive-sales/Exposure-Agent
+    orcaRepoId: 4ce21f1a-acae-4184-9aca-7b287ab3ee34
     baseRef: origin/main
     defaultBranch: main
