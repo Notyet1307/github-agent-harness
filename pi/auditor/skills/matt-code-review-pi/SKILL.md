@@ -81,7 +81,19 @@ Keep the axes independent. Do not merge or re-rank their findings.
 
 ## 4. Validate and emit the gate artifact
 
-Run approved validation commands and record at least one actual command result. If the repo exposes no validation script, use `git diff --check <fixed-point>...HEAD`. Write exactly one `.harness/audit-result.json` at the dispatched result path, using the full 40-character base and HEAD SHAs:
+Run approved validation commands and record at least one actual command result. If the repo exposes no validation script, use `git diff --check <fixed-point>...HEAD`. Write exactly one `.harness/audit-result.json` at the dispatched result path, using the full 40-character base and HEAD SHAs.
+
+Every finding array contains objects with a non-empty `summary`; optional `detail` and `blocking` fields must have the correct type or be omitted. Bare strings are invalid. For example:
+
+```json
+{
+  "summary": "Documented workflow policy is violated",
+  "detail": "Name the file, evidence, and consequence",
+  "blocking": true
+}
+```
+
+Smell judgement calls use the same object shape with `"blocking": false`. Use empty arrays when there are no findings:
 
 ```json
 {

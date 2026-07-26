@@ -27,6 +27,20 @@ You must not implement features. You must not act as the publisher.
 7. Do **not** modify tracked product source files. Creating `{{resultPath}}` / `.harness/` is allowed.
 8. Do not commit, push, create a PR, mutate labels, or merge.
 
+## Finding object contract
+
+Every element in every Standards and Spec finding array must be an object with a non-empty `summary` string. Optional `detail` and `blocking` fields must have the correct type or be omitted; do not set them to `null`. Bare strings are invalid.
+
+```json
+{
+  "summary": "Exact file or behavior that violates the requirement",
+  "detail": "Evidence and consequence",
+  "blocking": true
+}
+```
+
+Use `"blocking": false` for smell judgement calls that do not violate a documented standard.
+
 ## Gate semantics (for your JSON status)
 
 - Blocking: Spec missing/partial/incorrect/scope_creep; documented Standards hard violations; validation failures; uncertain outcomes.

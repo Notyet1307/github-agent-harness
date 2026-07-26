@@ -47,6 +47,33 @@ test("auditor dispatch requires the controller-owned user-scope reviewer", () =>
   assert.doesNotMatch(spec, /confirmProjectAgents/);
 });
 
+test("auditor contract requires finding objects instead of bare strings", () => {
+  const spec = renderAuditorSpec({
+    repo: "owner/repo",
+    issueNumber: 7,
+    issueUrl: "https://example.test/issues/7",
+    baseSha: "base-sha",
+    headSha: "head-sha",
+    branch: "issue-7",
+    worktreePath: "/tmp/issue-7",
+    profileId: "pi-reviewer",
+    orcaAgent: "pi",
+    invokeHint: "Invoke the audit skill.",
+    auditRound: 1,
+    resultPath: "/tmp/issue-7/.harness/audit-result.json",
+  });
+  const skill = readFileSync(
+    join(process.cwd(), "pi/auditor/skills/matt-code-review-pi/SKILL.md"),
+    "utf8",
+  );
+
+  for (const contract of [spec, skill]) {
+    assert.match(contract, /bare strings? (?:are|is) invalid/i);
+    assert.match(contract, /"summary"\s*:/);
+    assert.match(contract, /"blocking"\s*:/);
+  }
+});
+
 test("auditor subagents do not write debug artifacts into the business worktree", () => {
   const skill = readFileSync(
     join(

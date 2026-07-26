@@ -35,6 +35,33 @@ export function loadAuditResult(path: string): {
   }
 }
 
+export type AuditArtifactInspection =
+  | { status: "missing"; error: string }
+  | { status: "malformed"; error: string }
+  | { status: "current"; result: AuditResult }
+  | { status: "stale"; result: AuditResult };
+
+export function inspectAuditArtifact(
+  path: string,
+  expectedBaseSha: string,
+  expectedHeadSha: string,
+): AuditArtifactInspection {
+  const loaded = loadAuditResult(path);
+  if (!loaded.ok || !loaded.result) {
+    return {
+      status: existsSync(path) ? "malformed" : "missing",
+      error: loaded.error ?? "invalid audit result",
+    };
+  }
+  return auditResultMatchesShas(
+    loaded.result,
+    expectedBaseSha,
+    expectedHeadSha,
+  )
+    ? { status: "current", result: loaded.result }
+    : { status: "stale", result: loaded.result };
+}
+
 export function evaluateAuditGate(
   result: AuditResult | null,
   options: {
