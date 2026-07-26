@@ -13,6 +13,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditOnce } from "../src/audit-once.js";
+import { recover } from "../src/recover.js";
 import { Ledger } from "../src/ledger.js";
 import { publishOnce } from "../src/publisher.js";
 import type { AuditResult } from "../src/types.js";
@@ -46,7 +47,9 @@ type AuditFixtureMode =
   | "rework-late-failed"
   | "rework-pending-failed"
   | "rework-retry-drift"
-  | "rework-stale-terminal";
+  | "rework-stale-terminal"
+  | "audit-retry"
+  | "audit-retry-artifact-race";
 
 test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
   const fixture = createAuditFixture((baseSha, headSha) =>
@@ -916,6 +919,121 @@ test("rework blocks when the audited HEAD provenance is missing", (t) => {
   );
 });
 
+test("recover explicitly redispatches a malformed completed audit", (t) => {
+  const fixture = createAuditFixture(
+    (baseSha, headSha) =>
+      JSON.stringify({
+        ...auditResult("fail", baseSha, headSha),
+        standards: {
+          documented_standard_violations: ["bare violation"],
+          smell_judgement_calls: [],
+        },
+      }),
+    "audit-retry",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markCompletedAudit(fixture);
+  const artifactPath = join(
+    fixture.worktree,
+    ".harness",
+    "audit-result.json",
+  );
+  const malformedArtifact = readFileSync(artifactPath, "utf8");
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error: "invalid audit result: standards finding lists are invalid",
+  });
+  ledger.close();
+
+  const dryRun = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: true,
+  });
+
+  assert.equal(dryRun.action.kind, "audit_once");
+  if (dryRun.action.kind === "audit_once") {
+    assert.equal(dryRun.action.recovery, "retry_malformed_result");
+  }
+  assert.equal(dryRun.executed, false);
+  assert.equal(readFileSync(artifactPath, "utf8"), malformedArtifact);
+  const afterDryRun = new Ledger(fixture.ledgerPath);
+  assert.equal(afterDryRun.getJob("job-audit")?.state, "blocked");
+  afterDryRun.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.ok, true, recovered.message);
+  assert.equal(recovered.action.kind, "audit_once");
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  assert.equal(verified.getJob("job-audit")?.auditor_task_id, "task-audit-new");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
+test("malformed audit recovery stops when the artifact changes after planning", (t) => {
+  const fixture = createAuditFixture(
+    (baseSha, headSha) =>
+      JSON.stringify({
+        ...auditResult("fail", baseSha, headSha),
+        standards: {
+          documented_standard_violations: ["bare violation"],
+          smell_judgement_calls: [],
+        },
+      }),
+    "audit-retry-artifact-race",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markCompletedAudit(fixture);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error: "invalid audit result: standards finding lists are invalid",
+  });
+  ledger.close();
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.action.kind, "audit_once");
+  assert.equal(recovered.ok, false);
+  assert.equal(recovered.executed, false);
+  assert.match(recovered.message, /artifact changed to current/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
 function createAuditFixture(
   resultFactory: AuditResultFactory,
   mode: AuditFixtureMode = "missing-dispatch",
@@ -963,6 +1081,7 @@ const args = process.argv.slice(2).filter((arg) => arg !== "--json");
 appendFileSync(join(dir, "calls.jsonl"), JSON.stringify(args) + "\\n");
 const mode = readFileSync(join(dir, "mode"), "utf8");
 const reworkMode = mode.startsWith("rework-");
+const auditRetryMode = mode.startsWith("audit-retry");
 const statePath = join(dir, "state.json");
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const key = args.slice(0, 2).join(" ");
@@ -1021,9 +1140,11 @@ if (args[0] === "status") {
             : "Working on task-audit-new"]
         : mode === "rework-retry-drift" && fresh
         ? ["Provider unavailable: model error"]
-        : reworkMode
-          ? ["Working on task-rework"]
-          : [],
+        : auditRetryMode
+          ? ["Working on task-audit-new"]
+          : reworkMode
+            ? ["Working on task-rework"]
+            : [],
     nextCursor: "1",
     latestCursor: "1"
   } } }));
@@ -1032,6 +1153,28 @@ if (args[0] === "status") {
     terminal: { title: "agent", preview: "" }
   } }));
 } else if (key === "orchestration task-list") {
+  if (mode === "audit-retry-artifact-race") {
+    writeFileSync(
+      ${JSON.stringify(join(worktree, ".harness", "audit-result.json"))},
+      JSON.stringify({
+        status: "pass",
+        base_sha: ${JSON.stringify(baseSha)},
+        head_sha: ${JSON.stringify(headSha)},
+        standards: {
+          documented_standard_violations: [],
+          smell_judgement_calls: []
+        },
+        spec: {
+          missing_or_partial: [],
+          incorrect_implementation: [],
+          scope_creep: []
+        },
+        validation: {
+          commands: [{ command: "npm test", exit_code: 0, ok: true }]
+        }
+      })
+    );
+  }
   console.log(JSON.stringify({ ok: true, result: {
     tasks: [
       { id: "task-audit", status: "completed" },
@@ -1069,7 +1212,7 @@ if (args[0] === "status") {
     console.log(JSON.stringify({ ok: true, result:
       state.tasks === 1 ? { dispatchId: "dispatch-rework-1" } : {}
     }));
-  } else if (reworkMode) {
+  } else if (reworkMode || auditRetryMode) {
     const headSha = execFileSync(
       "git",
       ["-C", ${JSON.stringify(worktree)}, "rev-parse", "HEAD"],
@@ -1102,7 +1245,7 @@ if (args[0] === "status") {
     console.log(JSON.stringify({ ok: true, result: {} }));
   }
 } else if (key === "orchestration task-update") {
-  if (reworkMode) {
+  if (reworkMode || auditRetryMode) {
     console.log(JSON.stringify({ ok: true, result: {} }));
   } else {
     console.log(JSON.stringify({ ok: false, error: {
@@ -1110,9 +1253,20 @@ if (args[0] === "status") {
     } }));
     process.exitCode = 1;
   }
-} else if (key === "orchestration check" && reworkMode) {
+} else if (
+  key === "orchestration check" &&
+  (reworkMode || auditRetryMode)
+) {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));
+  if (auditRetryMode) {
+    console.log(JSON.stringify({ ok: true, result: { messages: [{
+      type: "worker_done",
+      taskId: "task-audit-new",
+      dispatchId: "dispatch-audit-new"
+    }] } }));
+    process.exit(0);
+  }
   if (mode === "rework-escalated-commit") {
     if (state.tasks > 0) {
       console.log(JSON.stringify({ ok: true, result: { messages: [{

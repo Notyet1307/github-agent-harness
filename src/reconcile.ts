@@ -1,3 +1,4 @@
+import type { AuditArtifactInspection } from "./audit-gate.js";
 import type { Job, JobState } from "./types.js";
 
 export const IMPLEMENT_NO_COMMITS_ERROR =
@@ -13,7 +14,11 @@ export type RecoverAction =
   | { kind: "run_once"; reason: string }
   | { kind: "finalize_implement"; reason: string }
   | { kind: "retry_implement"; reason: string }
-  | { kind: "audit_once"; reason: string }
+  | {
+      kind: "audit_once";
+      reason: string;
+      recovery?: "retry_malformed_result";
+    }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
   | { kind: "blocked"; reason: string; persist?: boolean }
@@ -35,6 +40,8 @@ export type ReconcileHints = {
   /** Orca orchestration task status if known. */
   implementTaskStatus?: string | null;
   auditTaskStatus?: string | null;
+  /** Strict audit artifact classification for the current base and HEAD. */
+  auditArtifactStatus?: AuditArtifactInspection["status"];
   /** Strict audit result exists and matches the current base and HEAD. */
   auditResultReady?: boolean;
   /** Remote open PR exists for branch. */
@@ -133,6 +140,22 @@ export function reconcileJob(
           kind: "retry_implement",
           reason:
             "implementation task ended without commits; explicit recovery may redispatch the same issue",
+        };
+      }
+      if (
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        hints.auditArtifactStatus === "malformed" &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "completed audit produced a malformed result; explicit recovery may dispatch a fresh auditor",
+          recovery: "retry_malformed_result",
         };
       }
       if (
@@ -277,6 +300,7 @@ export function recoveryInvariants(): string[] {
     "never create a second worktree for the same issue if one exists",
     "never create a second PR for the same head branch if one exists",
     "never advance work whose HEAD does not descend from the pinned base",
+    "never reuse a malformed audit result; recover only through a fresh audit",
     "never skip audit (audit_passed/publishing only after audit gate)",
     "never pick next issue before merged/cancelled",
   ];

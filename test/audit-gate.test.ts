@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   evaluateAuditGate,
+  inspectAuditArtifact,
   loadAuditResult,
   trackedDirty,
 } from "../src/audit-gate.js";
@@ -65,6 +66,11 @@ test("loadAuditResult requires full SHAs and actual validation evidence", (t) =>
     (result) => {
       result.standards.documented_standard_violations = [{ summary: " " }];
     },
+    (result) => {
+      result.standards.documented_standard_violations = [
+        "bare violation" as never,
+      ];
+    },
   ];
 
   for (const invalidate of invalidCases) {
@@ -75,6 +81,38 @@ test("loadAuditResult requires full SHAs and actual validation evidence", (t) =>
     assert.equal(loaded.ok, false);
     assert.match(loaded.error ?? "", /invalid audit result/);
   }
+});
+
+test("inspectAuditArtifact distinguishes malformed, stale, and current results", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "audit-gate-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "audit-result.json");
+
+  assert.equal(
+    inspectAuditArtifact(path, baseSha, headSha).status,
+    "missing",
+  );
+
+  const malformed = validAuditResult();
+  malformed.standards.documented_standard_violations = [
+    "bare violation" as never,
+  ];
+  writeFileSync(path, JSON.stringify(malformed));
+  assert.equal(
+    inspectAuditArtifact(path, baseSha, headSha).status,
+    "malformed",
+  );
+
+  const stale = validAuditResult();
+  stale.head_sha = "c".repeat(40);
+  writeFileSync(path, JSON.stringify(stale));
+  assert.equal(inspectAuditArtifact(path, baseSha, headSha).status, "stale");
+
+  writeFileSync(path, JSON.stringify(validAuditResult()));
+  assert.equal(
+    inspectAuditArtifact(path, baseSha, headSha).status,
+    "current",
+  );
 });
 
 test("evaluateAuditGate accepts a complete result for the exact SHAs", () => {

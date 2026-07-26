@@ -308,6 +308,55 @@ test("premature completion stays blocked while its task is still live", () => {
   assert.equal(a.kind, "blocked");
 });
 
+test("blocked malformed audit routes to a fresh explicit recovery", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error: "invalid audit result: standards finding lists are invalid",
+    }),
+    {
+      auditArtifactStatus: "malformed",
+      auditResultReady: false,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_malformed_result");
+  }
+});
+
+test("blocked malformed audit stays blocked without completed provenance", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error: "invalid audit result: standards finding lists are invalid",
+    }),
+    {
+      auditArtifactStatus: "malformed",
+      auditResultReady: false,
+      auditTaskStatus: "working",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "blocked");
+});
+
 test("blocked audit wait resumes when completed evidence is ready", () => {
   const a = reconcileJob(
     job({

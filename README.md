@@ -154,13 +154,15 @@ pnpm harness recover --execute
 | `audit_passed` / `publishing` | `publish-once`: find and reuse the PR by head |
 | `awaiting_merge` | `wait-merge`: poll and record the result only |
 | Recoverable blocked audit | `audit-once`: re-enter the normal gate |
+| Completed malformed audit | Explicit `recover --execute`: discard the malformed artifact and dispatch a fresh auditor for the same round |
 | Ended implementation with no commits | Redispatch in the same worktree only through explicit `recover --execute` |
 | Other `blocked` | Stop and keep the slot |
 | `merged` / no active job | Safe to claim the next issue |
 
 Never edit the ledger by hand or use an ad-hoc script to accept
-`.harness/audit-result.json`. Audits must re-enter the strict gate through
-`audit-once` or `recover --execute`.
+`.harness/audit-result.json`. Malformed results remain invalid and can only be
+recovered by a fresh, fenced audit through `recover --execute`. All audits must
+re-enter the strict gate through `audit-once` or `recover --execute`.
 
 Before claiming, `run-once` refreshes the configured remote-tracking `baseRef`,
 pins its full SHA, and requires the Orca worktree HEAD to match exactly. It

@@ -1,8 +1,8 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
-  auditResultMatchesShas,
-  loadAuditResult,
+  inspectAuditArtifact,
+  trackedDirty,
 } from "./audit-gate.js";
 import {
   defaultLedgerPath,
@@ -97,9 +97,9 @@ export function recover(options: {
       const head = job.worktree_path
         ? revParse(job.worktree_path, "HEAD")
         : null;
-      let ancestryError: string | null = null;
+      let recoveryError: string | null = null;
       if (!job.worktree_path || !job.base_sha || !head) {
-        ancestryError =
+        recoveryError =
           "cannot verify blocked audit recovery ancestry: unreadable worktree, base, or HEAD";
       } else {
         const ancestry = checkAncestor(
@@ -107,27 +107,86 @@ export function recover(options: {
           job.base_sha,
           head,
         );
-        ancestryError = !ancestry.ok
+        recoveryError = !ancestry.ok
           ? `cannot verify blocked audit recovery ancestry: ${ancestry.error}`
           : !ancestry.isAncestor
             ? "blocked audit recovery HEAD is not a descendant of base SHA"
             : null;
       }
-      if (ancestryError) {
+      if (
+        !recoveryError &&
+        action.recovery === "retry_malformed_result" &&
+        job.worktree_path &&
+        job.base_sha &&
+        head
+      ) {
+        if (!job.auditor_task_id) {
+          recoveryError =
+            "cannot recover malformed audit without the completed auditor task";
+        } else if (hints.auditTaskStatus?.toLowerCase() !== "completed") {
+          recoveryError =
+            "cannot recover malformed audit before the auditor task completes";
+        } else if (job.audit_round <= 0 || job.audit_head_sha !== head) {
+          recoveryError =
+            "cannot recover malformed audit without same-round HEAD provenance";
+        } else {
+          const artifact = inspectAuditArtifact(
+            join(job.worktree_path, ".harness", "audit-result.json"),
+            job.base_sha,
+            head,
+          );
+          const dirty = trackedDirty(job.worktree_path);
+          if (dirty) {
+            recoveryError =
+              `cannot recover malformed audit with tracked changes:\n${dirty}`;
+          } else if (artifact.status !== "malformed") {
+            recoveryError =
+              `cannot recover malformed audit after artifact changed to ${artifact.status}`;
+          }
+        }
+      }
+      if (recoveryError) {
         ledger.updateJob(job.id, {
           state: "blocked",
-          last_error: ancestryError,
+          last_error: recoveryError,
         });
         return {
           ...base,
           ok: false,
-          message: ancestryError,
+          message: recoveryError,
         };
       }
-      ledger.updateJob(job.id, {
-        state: "auditing",
-        last_error: null,
-      });
+      if (action.recovery === "retry_malformed_result") {
+        ledger.updateJob(job.id, {
+          state: "auditing",
+          auditor_terminal_handle: null,
+          auditor_task_id: null,
+          auditor_dispatch_id: null,
+          dispatch_attempt: 0,
+          dispatch_probe_pending: 0,
+          audit_result_json: null,
+          last_error: null,
+          head_sha: head,
+        });
+        try {
+          rmSync(
+            join(job.worktree_path!, ".harness", "audit-result.json"),
+            { force: true },
+          );
+        } catch (err) {
+          const error = `failed to clear malformed audit result: ${(err as Error).message}`;
+          ledger.updateJob(job.id, {
+            state: "blocked",
+            last_error: error,
+          });
+          return { ...base, ok: false, message: error };
+        }
+      } else {
+        ledger.updateJob(job.id, {
+          state: "auditing",
+          last_error: null,
+        });
+      }
     }
 
     // Execute without holding outer lock across long agent runs:
@@ -310,12 +369,13 @@ function gatherHints(
 
       const resultPath = join(job.worktree_path, ".harness", "audit-result.json");
       if (head) {
-        const loaded = loadAuditResult(resultPath);
-        hints.auditResultReady = Boolean(
-          loaded.ok &&
-            loaded.result &&
-            auditResultMatchesShas(loaded.result, job.base_sha, head),
+        const artifact = inspectAuditArtifact(
+          resultPath,
+          job.base_sha,
+          head,
         );
+        hints.auditArtifactStatus = artifact.status;
+        hints.auditResultReady = artifact.status === "current";
       }
     }
   }
