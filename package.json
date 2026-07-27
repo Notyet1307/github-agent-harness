@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.26.1",
   "bin": {
     "harness": "./dist/cli.js"
   },
@@ -14,13 +15,15 @@
     "test": "node --import tsx --test 'test/**/*.test.ts'"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "yaml": "^2.8.0"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.81.1",
     "@types/node": "^22.15.30",
+    "pi-subagents": "0.35.1",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3"
   }

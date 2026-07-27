@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { getAuditorProfile, loadConfig } from "../src/config.js";
-import { findPiAuditorAgentConflicts } from "../src/doctor.js";
+import { findPiAuditorAgentConflicts, runDoctor } from "../src/doctor.js";
 import { renderAuditorSpec } from "../src/prompts.js";
 
 test("active auditor uses the controller-owned Pi launcher", () => {
@@ -23,6 +23,34 @@ test("active auditor uses the controller-owned Pi launcher", () => {
     readFileSync(join(process.cwd(), "scripts/pi-auditor"), "utf8"),
     /reviewer_child=.*pi-reviewer-child[\s\S]*export PI_SUBAGENT_PI_BINARY="\$reviewer_child"/,
   );
+});
+
+test("doctor checks the auditor titlebar extension", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "harness-titlebar-doctor-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const piAgentDir = join(root, "pi-agent");
+  const configPath = join(root, "harness.yaml");
+  mkdirSync(join(piAgentDir, "extensions"), { recursive: true });
+  writeFileSync(join(piAgentDir, "extensions/orca-prefill.ts"), "");
+  writeFileSync(join(piAgentDir, "extensions/orca-agent-status.ts"), "");
+  writeFileSync(
+    configPath,
+    "version: 1\nissueLabel: ready-for-agent\nrepositories: []\n",
+  );
+
+  const original = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = piAgentDir;
+  t.after(() => {
+    if (original === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = original;
+  });
+
+  const report = runDoctor(configPath);
+  const check = report.checks.find(
+    (candidate) => candidate.name === "pi-auditor-extension:orca-titlebar",
+  );
+  assert.equal(check?.level, "fail");
+  assert.match(check?.detail ?? "", /orca-titlebar-spinner\.ts/);
 });
 
 test("auditor dispatch requires the controller-owned user-scope reviewer", () => {

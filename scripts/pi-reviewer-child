@@ -1,6 +1,15 @@
 #!/bin/zsh
 set -eu
 
+script_dir=${0:A:h}
+harness_root=${script_dir:h}
+pi_binary=${HARNESS_PI_BINARY:-"$harness_root/node_modules/.bin/pi"}
+
+if [[ ! -f "$pi_binary" ]]; then
+  print -u2 "pi-reviewer-child: missing required resource: $pi_binary"
+  exit 1
+fi
+
 unset \
   ORCA_AGENT_HOOK_ENDPOINT \
   ORCA_AGENT_HOOK_ENV \
@@ -16,4 +25,4 @@ unset \
   ORCA_WORKSPACE_ID \
   ORCA_WORKTREE_ID
 
-exec pi "$@"
+exec "$pi_binary" "$@"

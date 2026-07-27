@@ -8,16 +8,20 @@ export type ProjectIdentity = {
 
 export type ProjectRuntimeBinding = {
   localPath: string;
-  baseRef: string;
   orcaRepoId: string;
+};
+
+export type ProjectConfig = Omit<ProjectIdentity, "key"> & {
+  baseRef: string;
 };
 
 export type EnrolledProject = ProjectIdentity &
   Omit<ProjectRuntimeBinding, "orcaRepoId"> & {
+    baseRef: string;
     orcaRepoId: string | null;
   };
 
-export type RepoConfig = Omit<ProjectIdentity, "key"> & ProjectRuntimeBinding;
+export type RepoConfig = ProjectConfig & ProjectRuntimeBinding;
 
 export type ProjectSnapshot = {
   version: 1;
@@ -72,7 +76,6 @@ export type HarnessConfig = {
   orca: {
     cliPath: string;
     cliPathFallback: string;
-    controllerWorktreePath: string;
     controllerTitle: string;
   };
   /** Active profile ids by role. */
@@ -81,6 +84,10 @@ export type HarnessConfig = {
     auditor: string;
   };
   agentProfiles: Record<string, AgentProfile>;
+  repositories: ProjectConfig[];
+};
+
+export type RuntimeHarnessConfig = Omit<HarnessConfig, "repositories"> & {
   repositories: RepoConfig[];
 };
 

@@ -5,7 +5,13 @@ import { defaultConfigPath, HARNESS_ROOT, loadConfig } from "./config.js";
 import { execFile, which } from "./exec.js";
 import { ghAuthOk } from "./github.js";
 import { orcaStatus, resolveOrcaCli } from "./orca.js";
-import { planProjectAdd } from "./project.js";
+import {
+  ensureHarnessRepo,
+  loadOrcaRepoInventory,
+  planProjectAdd,
+  resolveProjectBindings,
+  type OrcaRepo,
+} from "./project.js";
 import type { HarnessConfig, RepoConfig } from "./types.js";
 // profiles validated inside loadConfig
 
@@ -141,9 +147,10 @@ export function runDoctor(configPath?: string): DoctorReport {
 
   // Agent CLIs required by the active profiles.
   const activeAgentBins = new Set(
-    [impl?.orcaAgent, aud?.orcaAgent].filter(
-      (bin): bin is "codex" | "pi" => bin === "codex" || bin === "pi",
-    ),
+    [impl, aud]
+      .filter((profile) => profile && !profile.command)
+      .map((profile) => profile!.orcaAgent)
+      .filter((bin): bin is "codex" | "pi" => bin === "codex" || bin === "pi"),
   );
   for (const bin of activeAgentBins) {
     const path = which(bin);
@@ -179,6 +186,7 @@ export function runDoctor(configPath?: string): DoctorReport {
 
   // Controller-owned Pi resources
   for (const [name, resourcePath] of [
+    ["pi-runtime", join(HARNESS_ROOT, "node_modules/.bin/pi")],
     ["pi-implementer-launcher", join(HARNESS_ROOT, "scripts/pi-implementer")],
     [
       "pi-implementer-reviewer-child",
@@ -223,7 +231,11 @@ export function runDoctor(configPath?: string): DoctorReport {
     ],
     [
       "pi-subagents-extension",
-      join(piAgentDir, "npm/node_modules/pi-subagents/index.ts"),
+      join(HARNESS_ROOT, "node_modules/pi-subagents/index.ts"),
+    ],
+    [
+      "pi-auditor-extension:orca-titlebar",
+      join(piAgentDir, "extensions/orca-titlebar-spinner.ts"),
     ],
   ] as const) {
     checks.push({
@@ -234,9 +246,13 @@ export function runDoctor(configPath?: string): DoctorReport {
   }
 
   const piSubagentsPackage = join(
-    piAgentDir,
-    "npm/node_modules/pi-subagents/package.json",
+    HARNESS_ROOT,
+    "node_modules/pi-subagents/package.json",
   );
+  const rootPackage = JSON.parse(
+    readFileSync(join(HARNESS_ROOT, "package.json"), "utf8"),
+  ) as { devDependencies?: Record<string, string> };
+  const expectedPiSubagents = rootPackage.devDependencies?.["pi-subagents"];
   let piSubagentsOk = false;
   let piSubagentsDetail = `missing ${piSubagentsPackage}`;
   if (existsSync(piSubagentsPackage)) {
@@ -246,8 +262,10 @@ export function runDoctor(configPath?: string): DoctorReport {
         version?: string;
       };
       piSubagentsOk =
-        pkg.name === "pi-subagents" && pkg.version === "0.35.1";
-      piSubagentsDetail = `${pkg.name ?? "pi-subagents"}@${pkg.version ?? "unknown"} (${piSubagentsPackage})`;
+        pkg.name === "pi-subagents" &&
+        typeof expectedPiSubagents === "string" &&
+        pkg.version === expectedPiSubagents;
+      piSubagentsDetail = `${pkg.name ?? "pi-subagents"}@${pkg.version ?? "unknown"} (${piSubagentsPackage}; expected ${expectedPiSubagents ?? "missing package pin"})`;
     } catch (err) {
       piSubagentsDetail = `invalid ${piSubagentsPackage}: ${(err as Error).message}`;
     }
@@ -303,6 +321,7 @@ export function runDoctor(configPath?: string): DoctorReport {
   });
 
   // Orca
+  let inventory: OrcaRepo[] | null = null;
   const orcaCli = resolveOrcaCli(config);
   if (!orcaCli) {
     checks.push({
@@ -321,10 +340,49 @@ export function runDoctor(configPath?: string): DoctorReport {
         : status.error ||
           `appRunning=${status.appRunning} runtimeReady=${status.runtimeReady}`,
     });
+    const loaded = loadOrcaRepoInventory(config, orcaCli);
+    if (!loaded.ok) {
+      checks.push({
+        name: "orca-repo-inventory",
+        level: "fail",
+        detail: loaded.error,
+      });
+    } else {
+      inventory = loaded.repos;
+      const controller = ensureHarnessRepo(config, true, inventory);
+      const current = controller.ok && !controller.message.startsWith("would ");
+      checks.push({
+        name: "orca-controller-repo",
+        level: current ? "ok" : "fail",
+        detail: controller.message,
+      });
+    }
   }
 
-  for (const repo of config.repositories) {
-    checks.push(...checkRepo(config, repo, configPath));
+  for (const project of config.repositories) {
+    const prefix = `repo:${project.github}`;
+    if (!orcaCli || !inventory) {
+      checks.push({
+        name: `${prefix}:enrollment`,
+        level: "fail",
+        detail: orcaCli ? "Orca repo inventory unavailable" : "orca CLI not found",
+      });
+      continue;
+    }
+    const resolved = resolveProjectBindings(
+      { ...config, repositories: [project] },
+      orcaCli,
+      inventory,
+    );
+    if (!resolved.ok) {
+      checks.push({
+        name: `${prefix}:enrollment`,
+        level: "fail",
+        detail: resolved.error,
+      });
+      continue;
+    }
+    checks.push(...checkRepo(config, resolved.projects[0]!, inventory, configPath));
   }
 
   const ok = checks.every((c) => c.level !== "fail");
@@ -334,6 +392,7 @@ export function runDoctor(configPath?: string): DoctorReport {
 function checkRepo(
   config: HarnessConfig,
   repo: RepoConfig,
+  inventory: OrcaRepo[],
   configPath?: string,
 ): Check[] {
   const checks: Check[] = [];
@@ -345,6 +404,7 @@ function checkRepo(
     defaultBranch: repo.defaultBranch,
     baseRef: repo.baseRef,
     dryRun: true,
+    orcaRepos: inventory,
   });
   for (const check of enrollment.checks) {
     checks.push({

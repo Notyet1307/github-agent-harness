@@ -8,7 +8,7 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMap, isSeq, parse as parseYaml, parseDocument } from "yaml";
-import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
+import type { AgentProfile, HarnessConfig, ProjectConfig } from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const HARNESS_ROOT = resolve(here, "..");
@@ -25,7 +25,7 @@ export function defaultLockPath(): string {
   return resolve(HARNESS_ROOT, "data/harness.lock");
 }
 
-export function writeRepoConfig(configPath: string, repo: RepoConfig): void {
+export function writeRepoConfig(configPath: string, repo: ProjectConfig): void {
   const source = readFileSync(configPath, "utf8");
   const document = parseDocument(source);
   if (document.errors.length > 0) {
@@ -47,12 +47,19 @@ export function writeRepoConfig(configPath: string, repo: RepoConfig): void {
     const github = candidate.get("github");
     return typeof github === "string" && github.toLowerCase() === key;
   });
+  const portable = {
+    github: repo.github,
+    baseRef: repo.baseRef,
+    defaultBranch: repo.defaultBranch,
+  };
   if (isMap(existing)) {
-    for (const [field, value] of Object.entries(repo)) {
+    existing.delete("localPath");
+    existing.delete("orcaRepoId");
+    for (const [field, value] of Object.entries(portable)) {
       existing.set(field, value);
     }
   } else {
-    repositories.add(repo);
+    repositories.add(portable);
   }
 
   const tempPath = join(
@@ -71,6 +78,28 @@ export function writeRepoConfig(configPath: string, repo: RepoConfig): void {
     }
     throw err;
   }
+}
+
+export function repoConfigNeedsWrite(
+  configPath: string,
+  repo: ProjectConfig,
+): boolean {
+  const parsed = parseYaml(readFileSync(configPath, "utf8")) as {
+    repositories?: Array<Record<string, unknown>>;
+  };
+  const existing = parsed.repositories?.find(
+    (candidate) =>
+      typeof candidate.github === "string" &&
+      candidate.github.toLowerCase() === repo.github.toLowerCase(),
+  );
+  return (
+    !existing ||
+    existing.github !== repo.github ||
+    existing.baseRef !== repo.baseRef ||
+    existing.defaultBranch !== repo.defaultBranch ||
+    "localPath" in existing ||
+    "orcaRepoId" in existing
+  );
 }
 
 export function loadConfig(path = defaultConfigPath()): HarnessConfig {
@@ -93,8 +122,6 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
     cliPathFallback:
       data.orca?.cliPathFallback ??
       "/Applications/Orca.app/Contents/Resources/bin/orca",
-    controllerWorktreePath:
-      data.orca?.controllerWorktreePath ?? HARNESS_ROOT,
     controllerTitle: data.orca?.controllerTitle ?? "harness-controller",
   };
   data.implementTimeoutMinutes = data.implementTimeoutMinutes ?? 45;
@@ -124,17 +151,16 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   return data;
 }
 
-function normalizeRepo(repo: RepoConfig): RepoConfig {
-  if (!repo.github || !repo.localPath || !repo.orcaRepoId || !repo.baseRef) {
+
+function normalizeRepo(repo: ProjectConfig): ProjectConfig {
+  if (!repo.github || !repo.baseRef) {
     throw new Error(
       `repository entry missing required fields: ${JSON.stringify(repo)}`,
     );
   }
   return {
-    ...repo,
-    localPath: isAbsolute(repo.localPath)
-      ? repo.localPath
-      : resolve(HARNESS_ROOT, repo.localPath),
+    github: repo.github,
+    baseRef: repo.baseRef,
     defaultBranch: repo.defaultBranch || "main",
   };
 }
@@ -167,6 +193,9 @@ function normalizeProfiles(
     }
     p.id = p.id ?? id;
     p.runtime = p.runtime ?? "orca";
+    if (p.command && !isAbsolute(p.command)) {
+      p.command = resolve(HARNESS_ROOT, p.command);
+    }
   }
   return profiles;
 }

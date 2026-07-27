@@ -102,6 +102,13 @@ const dispatched = existsSync(${JSON.stringify(statePath)});
 const ok = (result) => console.log(JSON.stringify({ ok: true, result }));
 if (args[0] === "status") {
   ok({ app: { running: true }, runtime: { state: "ready", reachable: true } });
+} else if (key === "repo list") {
+  ok({ repos: [{
+    id: "repo-1",
+    path: ${JSON.stringify(worktree)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  }] });
 } else if (key === "repo show") {
   ok({ repo: {
     id: "repo-1",
@@ -109,7 +116,7 @@ if (args[0] === "status") {
     worktreeBaseRef: "origin/main",
     gitRemoteIdentity: { canonicalKey: "owner/repo" }
   } });
-} else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${dir}`)})) {
+} else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${process.cwd()}`)})) {
   ok({ terminals: [{ handle: "controller-1", title: "test-controller", connected: true }] });
 } else if (key === "terminal list") {
   ok({ terminals: mode === "ambiguous" ? [
@@ -266,7 +273,6 @@ implementTimeoutMinutes: ${
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}
-  controllerWorktreePath: ${JSON.stringify(dir)}
   controllerTitle: test-controller
 activeProfiles:
   implementer: codex-default

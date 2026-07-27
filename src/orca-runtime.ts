@@ -2,6 +2,7 @@ import { basename } from "node:path";
 import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
 import { orcaJson, unwrapResult } from "./orca.js";
 import { execFile } from "./exec.js";
+import { HARNESS_ROOT } from "./config.js";
 import {
   verdictDispatchAccepted,
   type TerminalProbeSnapshot,
@@ -59,7 +60,7 @@ export function ensureControllerTerminal(
   config: HarnessConfig,
 ): { ok: true; handle: string } | { ok: false; error: string } {
   const title = config.orca.controllerTitle;
-  const path = config.orca.controllerWorktreePath;
+  const path = HARNESS_ROOT;
 
   const listed = orcaJson(orcaCli, [
     "terminal",

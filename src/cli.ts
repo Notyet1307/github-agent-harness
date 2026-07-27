@@ -11,9 +11,12 @@ import { WorkCoordinator } from "./work.js";
 import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
+import { checkSetupIdle } from "./setup.js";
 import {
   addProject,
+  ensureHarnessRepo,
   setupProjects,
+  loadRuntimeConfig,
   type EnrollmentResult,
 } from "./project.js";
 import { defaultLedgerPath } from "./config.js";
@@ -22,6 +25,7 @@ function usage(): string {
   return `github-agent-harness
 
 Usage:
+  harness setup --repo OWNER/REPO --path /abs/repo [--default-branch name] [--base-ref remote/name] [--dry-run] [--config path]
   harness doctor [--config path]
   harness project add --repo OWNER/REPO --path /abs/repo [--default-branch name] [--base-ref remote/name] [--dry-run] [--config path]
   harness project setup [--repo OWNER/REPO | --all] [--dry-run] [--config path]
@@ -54,6 +58,64 @@ function main(argv: string[]): number {
   }
 
   const configPath = readFlag(args, "--config") ?? defaultConfigPath();
+  if (cmd === "setup") {
+    const github = readFlag(args, "--repo");
+    const localPath = readFlag(args, "--path");
+    if (!github || !localPath) {
+      process.stderr.write(
+        "setup requires --repo OWNER/REPO and --path /abs/repo\n",
+      );
+      return 2;
+    }
+
+    const dryRun = args.includes("--dry-run");
+    const projectInput = {
+      configPath,
+      github,
+      localPath,
+      defaultBranch: readFlag(args, "--default-branch"),
+      baseRef: readFlag(args, "--base-ref"),
+    };
+    if (!dryRun) {
+      const validation = addProject({ ...projectInput, dryRun: true });
+      if (!validation.ok) {
+        printEnrollmentResult(validation, true);
+        return 1;
+      }
+
+      const idle = checkSetupIdle();
+      if (!idle.ok) {
+        process.stderr.write(
+          `setup refused while job ${idle.jobId} is active (${idle.state})\n`,
+        );
+        return 1;
+      }
+    }
+    let controller;
+    try {
+      controller = ensureHarnessRepo(loadConfig(configPath), dryRun);
+    } catch (err) {
+      process.stderr.write(`FAIL: ${(err as Error).message}\n`);
+      return 1;
+    }
+    const controllerStatus = !controller.ok
+      ? "FAIL"
+      : dryRun
+        ? "PLAN"
+        : controller.applied
+          ? "APPLY"
+          : "OK";
+    process.stdout.write(`${controllerStatus}: ${controller.message}\n`);
+    if (!controller.ok) return 1;
+
+    const result = addProject({ ...projectInput, dryRun });
+    printEnrollmentResult(result, dryRun);
+    if (!result.ok || dryRun) return result.ok ? 0 : 1;
+
+    const report = runDoctor(configPath);
+    process.stdout.write(`\n${formatDoctorReport(report)}\n`);
+    return report.ok ? 0 : 1;
+  }
 
   if (cmd === "project") {
     const subcommand = args[1];
@@ -130,7 +192,7 @@ function main(argv: string[]): number {
       );
       return 2;
     }
-    const config = loadConfig(configPath);
+    const config = loadRuntimeConfig(configPath);
     const onlyRepo = readFlag(args, "--repo");
     const repos = onlyRepo
       ? config.repositories.filter((r) => r.github === onlyRepo)

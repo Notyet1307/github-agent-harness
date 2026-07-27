@@ -30,26 +30,30 @@ audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执�
 
 ## 快速开始
 
-需要 Node.js 20+、pnpm、已认证的 `gh`、可用的 Orca runtime，以及配置中所需
-的 Pi 资源。
+需要 Node.js 22.19+、pnpm、已认证的 `gh`、可用的 Orca runtime，以及已配置
+provider 凭证的 Pi 用户目录。Pi CLI 与 `pi-subagents` 由项目依赖固定版本。
+
+新电脑 clone Harness 和目标仓库后，运行一次幂等 setup：
 
 ```bash
 cd ~/github-agent-harness
-pnpm install
+pnpm install --frozen-lockfile
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo
 pnpm harness doctor
 pnpm harness pick --dry-run
 pnpm test
 ```
 
-主配置位于 [`config/harness.yaml`](config/harness.yaml)。已有本地 clone 时，可用一条命令完成接入，无需人工查询 Orca id：
+增加 `--dry-run` 可只读预览 Git、GitHub、Orca 与配置动作。`setup` 会注册或复用
+Harness 与目标仓库、设置 base ref，并在完成后运行 doctor；重复执行不会重复注册。
+主配置 [`config/harness.yaml`](config/harness.yaml) 只保存 GitHub identity、分支和
+策略，不保存 `/Users/...` 或 Orca repo id。运行时通过 Orca identity 解析当前电脑的
+路径和 id，无需人工编辑 YAML。
 
-```bash
-pnpm harness project add \
-  --repo OWNER/REPO \
-  --path /absolute/path/to/repo
-```
-
-增加 `--dry-run` 可只读预览 Git、GitHub、Orca 与配置动作。`project setup --repo OWNER/REPO` 会重新验证并修复已有 Orca 注册/base-ref 绑定，`project setup --all` 会处理全部已配置仓库。项目接入不会 clone、领取 issue、固定 base SHA，也不会创建或修改 GitHub 标签。
+`project add/setup` 保留为底层单项目接入与修复命令。Setup 不会 clone、领取 issue、
+固定 base SHA，也不会创建或修改 GitHub 标签。
 
 开始真实任务前，应确保 `doctor` 为 PASS，并先用 dry-run 核对将被领取的 issue。
 
@@ -196,6 +200,10 @@ Implementer 显式加载 controller-owned Matt `implement` 与 `tdd`（固定到
 `pi-subagents`；不加载 ReadSeek。自动 skill、extension、prompt-template 与
 project Pi resource discovery 均关闭，但仍读取仓库 `AGENTS.md` /
 `CLAUDE.md`。
+
+Pi CLI 与固定版本的 `pi-subagents` 安装在项目 `node_modules`，随
+`pnpm install --frozen-lockfile` 更新；provider 凭证和 Orca-managed extensions 仍保留
+在用户目录，不进入仓库。
 
 Implementer 和 auditor 当前仍共享父 Pi provider/model 与
 `PI_CODING_AGENT_DIR`；角色级 provider/config 隔离尚未实现。Internal reviewer

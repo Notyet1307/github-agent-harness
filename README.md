@@ -32,32 +32,35 @@ protection requirements are satisfied.
 
 ## Quick start
 
-Requires Node.js 20+, pnpm, an authenticated `gh`, a ready Orca runtime, and
-the Pi resources required by the configuration.
+Requires Node.js 22.19+, pnpm, an authenticated `gh`, a ready Orca runtime, and
+a Pi user directory with provider credentials. The Pi CLI and `pi-subagents`
+versions are pinned as project dependencies.
+
+After cloning the harness and target repository on a new machine, run the
+idempotent setup once:
 
 ```bash
 cd ~/github-agent-harness
-pnpm install
+pnpm install --frozen-lockfile
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo
 pnpm harness doctor
 pnpm harness pick --dry-run
 pnpm test
 ```
 
-The main configuration is
-[`config/harness.yaml`](config/harness.yaml). Add an existing local clone without
-manually looking up its Orca id:
+Add `--dry-run` to inspect the Git, GitHub, Orca, and config actions without
+mutation. `setup` registers or reuses the harness and target repos, sets the
+base ref, and runs doctor when complete; reruns do not duplicate registration.
+The tracked [`config/harness.yaml`](config/harness.yaml) stores only GitHub
+identity, branches, and policy—not `/Users/...` paths or Orca repo ids. Runtime
+bindings are resolved from Orca identity on the current machine, so no manual
+YAML editing is required.
 
-```bash
-pnpm harness project add \
-  --repo OWNER/REPO \
-  --path /absolute/path/to/repo
-```
-
-Use `--dry-run` to inspect the Git, GitHub, Orca, and config actions without
-mutating anything. `project setup --repo OWNER/REPO` revalidates and repairs an
-existing Orca registration/base-ref binding; `project setup --all` processes all
-configured repositories. Enrollment never clones, claims an issue, pins a base
-SHA, or creates/modifies GitHub labels.
+`project add/setup` remain the lower-level single-project enrollment and repair
+commands. Setup never clones, claims an issue, pins a base SHA, or creates or
+modifies GitHub labels.
 
 Before real work, require a passing `doctor` result and use the dry-run picker to
 verify the issue that would be claimed.
@@ -222,6 +225,10 @@ plus the Pi-adapted `code-review`. It loads only Orca prefill/status and the
 approved `pi-subagents` version; ReadSeek is not loaded. Automatic skill,
 extension, prompt-template, and project Pi resource discovery are disabled,
 while repository `AGENTS.md` / `CLAUDE.md` context remains enabled.
+
+The Pi CLI and pinned `pi-subagents` live in the project `node_modules` tree and
+update through `pnpm install --frozen-lockfile`. Provider credentials and
+Orca-managed extensions remain user-scoped and are never stored in the repo.
 
 The implementer and auditor still share the parent Pi provider/model and
 `PI_CODING_AGENT_DIR`; role-level provider/config isolation remains deferred.

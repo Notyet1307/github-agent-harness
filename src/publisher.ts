@@ -1,8 +1,4 @@
-import {
-  defaultLedgerPath,
-  defaultLockPath,
-  loadConfig,
-} from "./config.js";
+import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { trackedDirty } from "./audit-gate.js";
 import { execFile } from "./exec.js";
 import {
@@ -14,9 +10,9 @@ import { checkAncestor, revParse, statusPorcelain } from "./git.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
-import { validateProjectRuntime } from "./project.js";
+import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import { setWorktreeProgress } from "./orca-runtime.js";
-import type { HarnessConfig, Job, RepoConfig } from "./types.js";
+import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type PublishResult = {
   ok: boolean;
@@ -34,7 +30,7 @@ export function publishOnce(options: {
   ledgerPath?: string;
   lockPath?: string;
 }): PublishResult {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const lock = acquireLock(options.lockPath ?? defaultLockPath());
   if (!lock.ok) return { ok: false, message: lock.error ?? "lock failed" };
   const ledger = new Ledger(options.ledgerPath ?? defaultLedgerPath());
@@ -47,7 +43,7 @@ export function publishOnce(options: {
 }
 
 function publishOnceLocked(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
 ): PublishResult {
   const log = (m: string) => process.stdout.write(`[publish-once] ${m}\n`);
@@ -313,7 +309,7 @@ function prTitle(job: Job): string {
 function prBody(
   job: Job,
   repo: RepoConfig,
-  _config: HarnessConfig,
+  _config: RuntimeHarnessConfig,
 ): string {
   let auditSummary = "(no audit json stored)";
   let auditRound = job.audit_round;

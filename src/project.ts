@@ -1,11 +1,23 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { loadConfig, writeRepoConfig } from "./config.js";
+import {
+  HARNESS_ROOT,
+  loadConfig,
+  repoConfigNeedsWrite,
+  writeRepoConfig,
+} from "./config.js";
 import { execFile } from "./exec.js";
 import { git } from "./git.js";
 import { orcaJson, requireOrcaCli, unwrapResult } from "./orca.js";
-import type { EnrolledProject, ProjectSnapshot, RepoConfig } from "./types.js";
+import type {
+  EnrolledProject,
+  HarnessConfig,
+  ProjectConfig,
+  ProjectSnapshot,
+  RepoConfig,
+  RuntimeHarnessConfig,
+} from "./types.js";
 export type { EnrolledProject } from "./types.js";
 
 export type ProjectCheck = {
@@ -26,6 +38,7 @@ export type AddProjectInput = {
   defaultBranch?: string;
   baseRef?: string;
   dryRun?: boolean;
+  orcaRepos?: OrcaRepo[];
 };
 
 export type SetupProjectsInput = {
@@ -49,7 +62,7 @@ export type EnrollmentResult = {
   actions: EnrollmentAction[];
 };
 
-type OrcaRepo = {
+export type OrcaRepo = {
   id: string;
   path: string;
   worktreeBaseRef?: string;
@@ -57,6 +70,119 @@ type OrcaRepo = {
     canonicalKey?: string;
   };
 };
+
+export function loadOrcaRepoInventory(
+  config: HarnessConfig,
+  orcaCli = requireOrcaCli(config),
+): { ok: true; repos: OrcaRepo[] } | { ok: false; error: string } {
+  const listed = orcaJson(orcaCli, ["repo", "list"]);
+  if (!listed.ok) {
+    return {
+      ok: false,
+      error: `orca repo list failed: ${listed.error ?? "unknown error"}`,
+    };
+  }
+  const repos = parseOrcaRepos(listed.data);
+  return repos
+    ? { ok: true, repos }
+    : { ok: false, error: "invalid Orca repo list response" };
+}
+
+export function resolveProjectBindings(
+  config: HarnessConfig,
+  orcaCli = requireOrcaCli(config),
+  inventory?: OrcaRepo[],
+): { ok: true; projects: RepoConfig[] } | { ok: false; error: string } {
+  const loaded = inventory
+    ? { ok: true as const, repos: inventory }
+    : loadOrcaRepoInventory(config, orcaCli);
+  if (!loaded.ok) return loaded;
+  const repos = loaded.repos;
+
+  const projects: RepoConfig[] = [];
+  for (const project of config.repositories) {
+    const key = normalizeProjectKey(project.github);
+    const matches = repos.filter((repo) => {
+      const identity = repo.gitRemoteIdentity?.canonicalKey;
+      return identity && normalizeProjectKey(identity) === key;
+    });
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        error: `project ${project.github} is not registered in Orca; run harness setup --repo ${project.github} --path /absolute/path`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error: `multiple Orca repos match ${project.github}: ${matches.map((repo) => repo.path).join(", ")}`,
+      };
+    }
+    const match = matches[0]!;
+    if (!match.id || !isAbsolute(match.path)) {
+      return {
+        ok: false,
+        error: `invalid Orca binding for ${project.github}: id=${match.id || "(missing)"} path=${match.path || "(missing)"}`,
+      };
+    }
+    projects.push({
+      ...project,
+      localPath: realpathOrOriginal(match.path),
+      orcaRepoId: match.id,
+    });
+  }
+  return { ok: true, projects };
+}
+
+export function loadRuntimeConfig(configPath?: string): RuntimeHarnessConfig {
+  const config = loadConfig(configPath);
+  if (config.repositories.length === 0) {
+    return { ...config, repositories: [] };
+  }
+  const resolved = resolveProjectBindings(config);
+  if (!resolved.ok) throw new Error(resolved.error);
+  return { ...config, repositories: resolved.projects };
+}
+
+export function ensureHarnessRepo(
+  config: HarnessConfig,
+  dryRun = false,
+  inventory?: OrcaRepo[],
+): { ok: boolean; applied: boolean; message: string } {
+  const orcaCli = requireOrcaCli(config);
+  const loaded = inventory
+    ? { ok: true as const, repos: inventory }
+    : loadOrcaRepoInventory(config, orcaCli);
+  if (!loaded.ok) {
+    return { ok: false, applied: false, message: loaded.error };
+  }
+  const repos = loaded.repos;
+  const matches = repos.filter(
+    (repo) => realpathOrOriginal(repo.path) === HARNESS_ROOT,
+  );
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      applied: false,
+      message: `multiple Orca repos are bound to ${HARNESS_ROOT}`,
+    };
+  }
+  if (matches.length === 1) {
+    return { ok: true, applied: false, message: "harness repo already registered" };
+  }
+  if (dryRun) {
+    return { ok: true, applied: false, message: `would register ${HARNESS_ROOT}` };
+  }
+  const added = orcaJson(orcaCli, ["repo", "add", "--path", HARNESS_ROOT]);
+  if (!added.ok) {
+    return {
+      ok: false,
+      applied: false,
+      message: `orca repo add failed: ${added.error ?? "unknown error"}`,
+    };
+  }
+  return { ok: true, applied: true, message: `registered ${HARNESS_ROOT}` };
+}
 
 export function createProjectSnapshot(repo: RepoConfig): {
   snapshot: ProjectSnapshot;
@@ -211,7 +337,7 @@ function isProjectSnapshot(value: unknown): value is ProjectSnapshot {
 }
 
 export function setupProjects(input: SetupProjectsInput): SetupReport {
-  let config;
+  let config: HarnessConfig;
   try {
     config = loadConfig(input.configPath);
   } catch (err) {
@@ -231,8 +357,24 @@ export function setupProjects(input: SetupProjectsInput): SetupReport {
       results: [],
     };
   }
+  if (repositories.length === 0) {
+    return { ok: true, message: "no projects configured", results: [] };
+  }
 
-  const results = repositories.map((repo) =>
+  let resolved;
+  try {
+    resolved = resolveProjectBindings(
+      { ...config, repositories },
+      requireOrcaCli(config),
+    );
+  } catch (err) {
+    return { ok: false, message: (err as Error).message, results: [] };
+  }
+  if (!resolved.ok) {
+    return { ok: false, message: resolved.error, results: [] };
+  }
+
+  const results = resolved.projects.map((repo) =>
     addProject({
       configPath: input.configPath,
       github: repo.github,
@@ -244,10 +386,7 @@ export function setupProjects(input: SetupProjectsInput): SetupReport {
   );
   return {
     ok: results.every((result) => result.ok),
-    message:
-      repositories.length === 0
-        ? "no projects configured"
-        : `checked ${repositories.length} project${repositories.length === 1 ? "" : "s"}`,
+    message: `checked ${repositories.length} project${repositories.length === 1 ? "" : "s"}`,
     results,
   };
 }
@@ -342,21 +481,9 @@ export function addProject(input: AddProjectInput): EnrollmentResult {
       continue;
     }
 
-    if (!project.orcaRepoId) {
-      return {
-        ok: false,
-        status: "failed",
-        message: "cannot write project config without an Orca repo id",
-        project,
-        checks: planned.checks,
-        actions,
-      };
-    }
     try {
       writeRepoConfig(input.configPath, {
         github: project.github,
-        localPath: project.localPath,
-        orcaRepoId: project.orcaRepoId,
         baseRef: project.baseRef,
         defaultBranch: project.defaultBranch,
       });
@@ -494,26 +621,6 @@ export function planProjectAdd(input: AddProjectInput): EnrollmentResult {
     return failed((err as Error).message, checks, actions);
   }
 
-  const sameKey = config.repositories.find(
-    (repo) => normalizeProjectKey(repo.github) === github.key,
-  );
-  if (sameKey && projectRootOrOriginal(sameKey.localPath) !== localPath) {
-    return failed(
-      `project ${sameKey.github} is already bound to ${sameKey.localPath}`,
-      checks,
-      actions,
-    );
-  }
-  const samePath = config.repositories.find(
-    (repo) => projectRootOrOriginal(repo.localPath) === localPath,
-  );
-  if (samePath && normalizeProjectKey(samePath.github) !== github.key) {
-    return failed(
-      `path ${localPath} is already bound to ${samePath.github}`,
-      checks,
-      actions,
-    );
-  }
 
   let orcaCli: string;
   try {
@@ -521,32 +628,41 @@ export function planProjectAdd(input: AddProjectInput): EnrollmentResult {
   } catch (err) {
     return failed((err as Error).message, checks, actions);
   }
-  const listed = orcaJson(orcaCli, ["repo", "list"]);
-  if (!listed.ok) {
+  let repos = input.orcaRepos;
+  if (!repos) {
+    const loaded = loadOrcaRepoInventory(config, orcaCli);
+    if (!loaded.ok) return failed(loaded.error, checks, actions);
+    repos = loaded.repos;
+  }
+  const pathMatches = repos.filter(
+    (repo) => realpathOrOriginal(repo.path) === localPath,
+  );
+  if (pathMatches.length > 1) {
+    return failed(`multiple Orca repos are bound to ${localPath}`, checks, actions);
+  }
+  const identityMatches = repos.filter((repo) => {
+    const identity = repo.gitRemoteIdentity?.canonicalKey;
+    return identity && normalizeProjectKey(identity) === github.key;
+  });
+  if (identityMatches.length > 1) {
     return failed(
-      `orca repo list failed: ${listed.error ?? "unknown error"}`,
+      `multiple Orca repos match ${github.display}: ${identityMatches.map((repo) => repo.path).join(", ")}`,
       checks,
       actions,
     );
   }
-  const repos = parseOrcaRepos(listed.data);
-  if (!repos) {
-    return failed("invalid Orca repo list response", checks, actions);
-  }
-  const matches = repos.filter(
-    (repo) => realpathOrOriginal(repo.path) === localPath,
-  );
-  if (matches.length > 1) {
-    return failed(`multiple Orca repos are bound to ${localPath}`, checks, actions);
-  }
-  const orcaRepo = matches[0];
+  const orcaRepo = pathMatches[0];
   const orcaIdentity = orcaRepo?.gitRemoteIdentity?.canonicalKey;
-  if (
-    orcaIdentity &&
-    normalizeProjectKey(orcaIdentity) !== github.key
-  ) {
+  if (orcaRepo && (!orcaIdentity || normalizeProjectKey(orcaIdentity) !== github.key)) {
     return failed(
-      `Orca repo identity ${orcaIdentity} does not match ${github.display}`,
+      `Orca repo identity ${orcaIdentity ?? "(missing)"} does not match ${github.display}`,
+      checks,
+      actions,
+    );
+  }
+  if (!orcaRepo && identityMatches[0]) {
+    return failed(
+      `Orca already registers ${github.display} at ${identityMatches[0].path}; remove the stale registration or use that path`,
       checks,
       actions,
     );
@@ -573,13 +689,12 @@ export function planProjectAdd(input: AddProjectInput): EnrollmentResult {
     actions.push({ kind: "set_orca_base_ref", applied: false });
   }
 
-  const configMatches =
-    sameKey &&
-    sameKey.localPath === localPath &&
-    sameKey.defaultBranch === defaultBranch &&
-    sameKey.baseRef === baseRef &&
-    sameKey.orcaRepoId === orcaRepo?.id;
-  if (!configMatches) {
+  const portable: ProjectConfig = {
+    github: github.display,
+    defaultBranch,
+    baseRef,
+  };
+  if (repoConfigNeedsWrite(input.configPath, portable)) {
     actions.push({ kind: "write_config", applied: false });
   }
 

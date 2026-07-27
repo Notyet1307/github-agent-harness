@@ -3,7 +3,6 @@ import {
   defaultLedgerPath,
   defaultLockPath,
   getImplementerProfile,
-  loadConfig,
 } from "./config.js";
 import { trackedDirty } from "./audit-gate.js";
 import {
@@ -21,7 +20,7 @@ import {
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { pickForRepo } from "./picker.js";
-import { validateProjectRuntime } from "./project.js";
+import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import { renderImplementerSpec } from "./prompts.js";
 import { IMPLEMENT_NO_COMMITS_ERROR } from "./reconcile.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
@@ -35,7 +34,7 @@ import {
   waitWorkerDone,
   type DispatchWait,
 } from "./orca-runtime.js";
-import type { HarnessConfig, Job, RepoConfig } from "./types.js";
+import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type RunOnceResult = {
   ok: boolean;
@@ -66,7 +65,7 @@ export function runOnce(options: {
   /** Refuse legacy blocked-job retries when called by automatic coordination. */
   automaticCoordination?: boolean;
 }): RunOnceResult {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const lockPath = options.lockPath ?? defaultLockPath();
   const lock = acquireLock(lockPath);
   if (!lock.ok) {
@@ -87,7 +86,7 @@ export function runOnce(options: {
 }
 
 function runOnceLocked(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
   options: {
     repoFilter?: string;

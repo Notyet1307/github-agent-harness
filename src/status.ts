@@ -1,16 +1,14 @@
-import {
-  defaultLedgerPath,
-  loadConfig,
-} from "./config.js";
+import { defaultLedgerPath } from "./config.js";
 import { Ledger } from "./ledger.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import { taskList, worktreePs } from "./orca-runtime.js";
+import { loadRuntimeConfig } from "./project.js";
 
 export function formatStatus(options: {
   configPath?: string;
   ledgerPath?: string;
 }): string {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const lines: string[] = ["harness status", ""];
 
   lines.push(`implementer profile: ${config.activeProfiles.implementer}`);
