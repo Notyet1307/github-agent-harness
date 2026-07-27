@@ -7,9 +7,15 @@ import { auditOnce } from "./audit-once.js";
 import { publishOnce } from "./publisher.js";
 import { waitMerge } from "./merge-monitor.js";
 import { recover } from "./recover.js";
+import { WorkCoordinator } from "./work.js";
 import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
+import {
+  addProject,
+  setupProjects,
+  type EnrollmentResult,
+} from "./project.js";
 import { defaultLedgerPath } from "./config.js";
 
 function usage(): string {
@@ -17,12 +23,15 @@ function usage(): string {
 
 Usage:
   harness doctor [--config path]
+  harness project add --repo OWNER/REPO --path /abs/repo [--default-branch name] [--base-ref remote/name] [--dry-run] [--config path]
+  harness project setup [--repo OWNER/REPO | --all] [--dry-run] [--config path]
   harness pick --dry-run [--config path] [--repo OWNER/REPO]
   harness run-once [--config path] [--repo OWNER/REPO] [--issue N]
   harness audit-once [--config path] [--no-rework]
   harness publish-once [--config path]
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness recover [--config path] [--dry-run] [--execute]
+  harness work [--config path] [--repo OWNER/REPO] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness status [--config path]
   harness help
@@ -45,6 +54,63 @@ function main(argv: string[]): number {
   }
 
   const configPath = readFlag(args, "--config") ?? defaultConfigPath();
+
+  if (cmd === "project") {
+    const subcommand = args[1];
+    if (subcommand === "add") {
+      const github = readFlag(args, "--repo");
+      const localPath = readFlag(args, "--path");
+      if (!github || !localPath) {
+        process.stderr.write("project add requires --repo OWNER/REPO and --path /abs/repo\n");
+        return 2;
+      }
+      const result = addProject({
+        configPath,
+        github,
+        localPath,
+        defaultBranch: readFlag(args, "--default-branch"),
+        baseRef: readFlag(args, "--base-ref"),
+        dryRun: args.includes("--dry-run"),
+      });
+      printEnrollmentResult(result, args.includes("--dry-run"));
+      return result.ok ? 0 : 1;
+    }
+    if (subcommand === "setup") {
+      const github = readFlag(args, "--repo");
+      const all = args.includes("--all");
+      const unknown = args
+        .slice(2)
+        .filter(
+          (arg) =>
+            arg.startsWith("--") &&
+            !["--repo", "--all", "--dry-run", "--config"].includes(arg),
+        );
+      if (
+        unknown.length > 0 ||
+        (args.includes("--repo") && !github) ||
+        Number(Boolean(github)) + Number(all) !== 1
+      ) {
+        process.stderr.write(
+          "project setup requires exactly one of --repo OWNER/REPO or --all\n",
+        );
+        return 2;
+      }
+      const report = setupProjects({
+        configPath,
+        github,
+        dryRun: args.includes("--dry-run"),
+      });
+      for (const result of report.results) {
+        printEnrollmentResult(result, args.includes("--dry-run"));
+      }
+      if (report.results.length === 0) {
+        process.stdout.write(`${report.ok ? "OK" : "FAIL"}: ${report.message}\n`);
+      }
+      return report.ok ? 0 : 1;
+    }
+    process.stderr.write("project requires add or setup\n");
+    return 2;
+  }
 
   if (cmd === "doctor") {
     const report = runDoctor(configPath);
@@ -221,6 +287,70 @@ function main(argv: string[]): number {
     return result.ok ? 0 : 1;
   }
 
+  if (cmd === "work") {
+    const repoFilter = readFlag(args, "--repo");
+    const maxRaw = readFlag(args, "--max-cycles");
+    const pollRaw = readFlag(args, "--poll-seconds");
+    const maxCycles = maxRaw != null ? Number(maxRaw) : 0;
+    const pollSeconds = pollRaw != null ? Number(pollRaw) : 0;
+    if (args.includes("--repo") && !repoFilter) {
+      process.stderr.write("work --repo requires OWNER/REPO\n");
+      return 2;
+    }
+    if (
+      maxRaw != null &&
+      (!Number.isSafeInteger(maxCycles) || maxCycles < 1)
+    ) {
+      process.stderr.write("invalid --max-cycles\n");
+      return 2;
+    }
+    if (
+      pollRaw != null &&
+      (!Number.isFinite(pollSeconds) || pollSeconds < 0)
+    ) {
+      process.stderr.write("invalid --poll-seconds\n");
+      return 2;
+    }
+    if (
+      repoFilter &&
+      !loadConfig(configPath).repositories.some(
+        (repo) => repo.github === repoFilter,
+      )
+    ) {
+      process.stderr.write(`repo not in config: ${repoFilter}\n`);
+      return 2;
+    }
+
+    const result = new WorkCoordinator().run({
+      configPath,
+      repoFilter,
+      once: args.includes("--once"),
+      dryRun: args.includes("--dry-run"),
+      maxCycles,
+      pollSeconds,
+    });
+    process.stdout.write(
+      `\n${result.ok ? "OK" : "FAIL"}: ${result.message} (cycles=${result.cycles})\n`,
+    );
+    process.stdout.write(
+      `action: ${result.last.plan.action.kind} (${result.last.plan.execution})\n`,
+    );
+    if (result.last.plan.jobId) {
+      process.stdout.write(`job: ${result.last.plan.jobId}\n`);
+    }
+    if (result.last.result?.details) {
+      process.stdout.write(
+        `${JSON.stringify(result.last.result.details, null, 2)}\n`,
+      );
+    }
+    if (result.last.plan.execution === "explicit_recovery") {
+      process.stdout.write(
+        "\nStopped: inspect with recover --dry-run, then use recover --execute explicitly.\n",
+      );
+    }
+    return result.ok ? 0 : 1;
+  }
+
   if (cmd === "watch") {
     const maxRaw = readFlag(args, "--max-cycles");
     const pollRaw = readFlag(args, "--poll-seconds");
@@ -249,6 +379,22 @@ function main(argv: string[]): number {
 
   process.stderr.write(usage());
   return 2;
+}
+
+function printEnrollmentResult(
+  result: EnrollmentResult,
+  dryRun: boolean,
+): void {
+  const prefix = dryRun && result.ok ? "PLAN" : result.ok ? "OK" : "FAIL";
+  process.stdout.write(`${prefix}: ${result.message}\n`);
+  for (const check of result.checks) {
+    process.stdout.write(`  ${check.ok ? "OK" : "FAIL"} ${check.name}: ${check.detail}\n`);
+  }
+  for (const action of result.actions) {
+    process.stdout.write(
+      `  ${action.applied ? "APPLIED" : "WOULD"} ${action.kind}\n`,
+    );
+  }
 }
 
 function readFlag(args: string[], name: string): string | undefined {

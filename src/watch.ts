@@ -1,8 +1,10 @@
 import { loadConfig } from "./config.js";
-import { recover, type RecoverResult } from "./recover.js";
-import { runOnce } from "./run-once.js";
 import { execFile } from "./exec.js";
 import type { RecoverAction } from "./reconcile.js";
+import {
+  WorkCoordinator,
+  type WorkCycleResult,
+} from "./work.js";
 
 export type WatchCyclePlan = {
   /** What this cycle intends to do. */
@@ -18,7 +20,7 @@ export type WatchCyclePlan = {
 
 export type WatchCycleResult = {
   plan: WatchCyclePlan;
-  result?: RecoverResult | { ok: boolean; message: string; jobId?: string };
+  result?: WorkCycleResult["result"];
   sleptSeconds: number;
 };
 
@@ -108,6 +110,7 @@ export function watch(options: WatchOptions = {}): {
     });
 
   const config = loadConfig(options.configPath);
+  const coordinator = new WorkCoordinator();
   const pollSeconds = Math.max(
     5,
     options.pollSeconds ?? config.pollIntervalSeconds ?? 120,
@@ -136,10 +139,10 @@ export function watch(options: WatchOptions = {}): {
       cycles += 1;
       log(`── cycle ${cycles} ──`);
 
-      const cycle = runOneCycle({
+      const cycle = runWatchCycle({
+        coordinator,
         configPath: options.configPath,
         dryRun: options.dryRun,
-        pollSeconds,
         log,
       });
 
@@ -169,68 +172,37 @@ export function watch(options: WatchOptions = {}): {
   return { ok: true, cycles, message: "stopped" };
 }
 
-function runOneCycle(opts: {
+export function runWatchCycle(opts: {
+  coordinator: WorkCoordinator;
   configPath?: string;
+  ledgerPath?: string;
+  lockPath?: string;
   dryRun?: boolean;
-  pollSeconds: number;
   log: (line: string) => void;
 }): WatchCycleResult {
-  const { log } = opts;
-
-  // 1) Inspect (dry recover always for plan)
-  const inspected = recover({
+  const coordinated = opts.coordinator.cycle({
+    mode: "automatic",
     configPath: opts.configPath,
-    dryRun: true,
-    waitMergeTimeoutMinutes: 0,
+    ledgerPath: opts.ledgerPath,
+    lockPath: opts.lockPath,
+    dryRun: opts.dryRun,
   });
-  const plan = planWatchCycle(inspected.action);
-  log(`plan: ${plan.step} — ${plan.reason}`);
+  const plan = planWatchCycle(coordinated.plan.action);
+  opts.log(`plan: ${plan.step} — ${plan.reason}`);
 
-  if (opts.dryRun) {
-    return { plan, result: inspected, sleptSeconds: 0 };
+  if (coordinated.result) {
+    opts.log(
+      `${coordinated.result.ok ? "ok" : "fail"}: ${coordinated.result.message}`,
+    );
+  } else if (!coordinated.executed) {
+    opts.log(plan.reason);
   }
 
-  // 2) Execute
-  if (plan.step === "blocked_wait" || plan.step === "noop_sleep") {
-    log(plan.reason);
-    return { plan, result: inspected, sleptSeconds: 0 };
-  }
-
-  if (plan.step === "claim_and_implement") {
-    log("no active job → run-once (claim if eligible)");
-    const r = runOnce({ configPath: opts.configPath });
-    log(`${r.ok ? "ok" : "fail"}: ${r.message}`);
-    // If we just finished implement, chain audit in same cycle for throughput
-    if (r.ok && r.details && (r.details as { state?: string }).state === "awaiting_audit") {
-      log("chaining audit-once after implement");
-      const a = recover({
-        configPath: opts.configPath,
-        dryRun: false,
-        waitMergeTimeoutMinutes: 0,
-      });
-      log(`chain: ${a.action.kind} — ${a.message}`);
-      return { plan, result: a, sleptSeconds: 0 };
-    }
-    // run-once may return "no eligible issue"
-    return { plan, result: r, sleptSeconds: 0 };
-  }
-
-  if (plan.step === "resume") {
-    log(`execute resume: ${plan.action.kind}`);
-    const r = recover({
-      configPath: opts.configPath,
-      dryRun: false,
-      waitMergeTimeoutMinutes: 0,
-    });
-    log(`${r.ok ? "ok" : "fail"}: ${r.message}`);
-
-    // Optional chain: after audit_passed in same cycle → publish
-    // recover already did one step; next cycle will publish. Keep one step
-    // per cycle for simpler failure isolation, except implement→audit above.
-    return { plan, result: r, sleptSeconds: 0 };
-  }
-
-  return { plan, sleptSeconds: 0 };
+  return {
+    plan,
+    result: coordinated.result,
+    sleptSeconds: 0,
+  };
 }
 
 function sleepSeconds(seconds: number): void {

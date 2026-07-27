@@ -23,9 +23,21 @@ export function formatStatus(options: {
     if (!active) {
       lines.push("active job: (none)");
     } else {
+      const project = ledger.resolveJobProject(
+        active.id,
+        config.repositories,
+        "read_only",
+      );
       lines.push("active job:");
       lines.push(`  id:        ${active.id}`);
       lines.push(`  repo:      ${active.repo}#${active.issue_number}`);
+      lines.push(
+        `  project:   ${
+          project.ok
+            ? `${project.project.localPath} (${project.source})`
+            : `invalid — ${project.error}`
+        }`,
+      );
       lines.push(`  state:     ${active.state}`);
       lines.push(`  branch:    ${active.branch ?? "-"}`);
       lines.push(`  base_sha:  ${active.base_sha ?? "-"}`);

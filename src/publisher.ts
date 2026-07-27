@@ -14,6 +14,7 @@ import { checkAncestor, revParse, statusPorcelain } from "./git.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
+import { validateProjectRuntime } from "./project.js";
 import { setWorktreeProgress } from "./orca-runtime.js";
 import type { HarnessConfig, Job, RepoConfig } from "./types.js";
 
@@ -78,10 +79,10 @@ function publishOnceLocked(
     };
   }
 
-  const repo = config.repositories.find((r) => r.github === job!.repo);
-  if (!repo) {
-    return { ok: false, jobId: job.id, message: `repo not in config: ${job.repo}` };
-  }
+  const project = ledger.resolveJobProject(job.id, config.repositories);
+  if (!project.ok) return block(ledger, job, project.error);
+  job = project.job;
+  const repo = project.project;
   if (
     !job.worktree_path ||
     !job.worktree_id ||
@@ -145,6 +146,8 @@ function publishOnceLocked(
   if (!st.ok) {
     return { ok: false, message: `orca not ready: ${st.error ?? "unknown"}` };
   }
+  const runtime = validateProjectRuntime(repo, orcaCli);
+  if (!runtime.ok) return block(ledger, job, runtime.error);
 
   job = ledger.updateJob(job.id, { state: "publishing" });
   setWorktreeProgress(

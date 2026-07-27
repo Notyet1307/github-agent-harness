@@ -1,7 +1,13 @@
-import { readFileSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import {
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parse as parseYaml } from "yaml";
+import { isMap, isSeq, parse as parseYaml, parseDocument } from "yaml";
 import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,6 +25,54 @@ export function defaultLockPath(): string {
   return resolve(HARNESS_ROOT, "data/harness.lock");
 }
 
+export function writeRepoConfig(configPath: string, repo: RepoConfig): void {
+  const source = readFileSync(configPath, "utf8");
+  const document = parseDocument(source);
+  if (document.errors.length > 0) {
+    throw new Error(document.errors.map((error) => error.message).join("; "));
+  }
+
+  let repositories = document.get("repositories", true);
+  if (repositories == null) {
+    document.set("repositories", []);
+    repositories = document.get("repositories", true);
+  }
+  if (!isSeq(repositories)) {
+    throw new Error("config.repositories must be a YAML sequence");
+  }
+
+  const key = repo.github.toLowerCase();
+  const existing = repositories.items.find((candidate) => {
+    if (!isMap(candidate)) return false;
+    const github = candidate.get("github");
+    return typeof github === "string" && github.toLowerCase() === key;
+  });
+  if (isMap(existing)) {
+    for (const [field, value] of Object.entries(repo)) {
+      existing.set(field, value);
+    }
+  } else {
+    repositories.add(repo);
+  }
+
+  const tempPath = join(
+    dirname(configPath),
+    `.${process.pid}-${Date.now()}-${configPath.split("/").pop() ?? "harness.yaml"}.tmp`,
+  );
+  const mode = statSync(configPath).mode & 0o777;
+  try {
+    writeFileSync(tempPath, document.toString(), { mode });
+    renameSync(tempPath, configPath);
+  } catch (err) {
+    try {
+      rmSync(tempPath, { force: true });
+    } catch {
+      // Best effort; preserve the original config write error.
+    }
+    throw err;
+  }
+}
+
 export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   const raw = readFileSync(path, "utf8");
   const data = parseYaml(raw) as HarnessConfig;
@@ -26,8 +80,8 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   if (!data || typeof data !== "object") {
     throw new Error(`Invalid config: ${path}`);
   }
-  if (!Array.isArray(data.repositories) || data.repositories.length === 0) {
-    throw new Error("config.repositories must be a non-empty array");
+  if (!Array.isArray(data.repositories)) {
+    throw new Error("config.repositories must be an array");
   }
   if (!data.issueLabel) {
     throw new Error("config.issueLabel is required");

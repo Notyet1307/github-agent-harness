@@ -24,6 +24,34 @@ export type RecoverAction =
   | { kind: "blocked"; reason: string; persist?: boolean }
   | { kind: "none"; reason: string };
 
+export type RecoverExecution = "automatic" | "explicit_recovery" | "none";
+
+export function classifyRecoverExecution(
+  action: RecoverAction,
+  state?: JobState,
+): RecoverExecution {
+  if (
+    action.kind === "retry_implement" ||
+    action.kind === "finalize_implement" ||
+    (state === "blocked" && action.kind === "audit_once")
+  ) {
+    return "explicit_recovery";
+  }
+
+  if (
+    action.kind === "run_once" ||
+    action.kind === "audit_once" ||
+    action.kind === "publish_once" ||
+    action.kind === "wait_merge" ||
+    (action.kind === "blocked" && action.persist) ||
+    (action.kind === "none" && state === undefined)
+  ) {
+    return "automatic";
+  }
+
+  return "none";
+}
+
 export type ReconcileHints = {
   /** Worktree path exists on disk. */
   worktreeExists?: boolean;
@@ -86,7 +114,8 @@ export function reconcileJob(
     return {
       kind: "blocked",
       reason: baseLineageError,
-      persist: job.state !== "blocked",
+      persist:
+        job.state !== "blocked" || job.last_error !== baseLineageError,
     };
   }
 

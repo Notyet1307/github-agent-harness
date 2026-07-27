@@ -2,11 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Ledger } from "../src/ledger.js";
@@ -49,6 +51,49 @@ test("runOnce keeps an Orca worktree list failure retryable", (t) => {
   assert.equal(verified.getJob("job-1")?.state, "claimed");
   verified.close();
   assert.equal(hasCall(fixture.calls(), "worktree", "create"), false);
+});
+
+test("runOnce resumes a snapshotted job after its config entry is removed", (t) => {
+  const fixture = makeRunOnceFixture(completeList([]));
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", { state: "awaiting_audit" });
+  ledger.close();
+  const config = readFileSync(fixture.configPath, "utf8");
+  writeFileSync(
+    fixture.configPath,
+    config.replace(/repositories:[\s\S]*$/, "repositories: []\n"),
+  );
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: fixture.lockPath,
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(result.message, /past implement/);
+});
+
+test("runOnce blocks when the snapshotted project path cannot be verified", (t) => {
+  const fixture = makeRunOnceFixture(completeList([]));
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", { state: "awaiting_audit" });
+  ledger.close();
+  rmSync(fixture.repoPath, { recursive: true, force: true });
+
+  const result = runOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: fixture.lockPath,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /not a readable Git worktree/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-1")?.state, "blocked");
+  verified.close();
 });
 
 test("selects issue-1 exactly when issue-10 is listed first", (t) => {
@@ -214,6 +259,7 @@ function makeRunOnceFixture(listResponse: unknown): {
   ledgerPath: string;
   lockPath: string;
   dir: string;
+  repoPath: string;
   calls: () => string[][];
 } {
   const fake = makeFakeOrca(listResponse);
@@ -247,7 +293,7 @@ agentProfiles:
     invokeHint: audit
 repositories:
   - github: owner/repo
-    localPath: ${JSON.stringify(fake.dir)}
+    localPath: ${JSON.stringify(fake.repoPath)}
     orcaRepoId: repo-1
     baseRef: origin/main
     defaultBranch: main
@@ -256,7 +302,13 @@ repositories:
   const ledger = new Ledger(ledgerPath);
   const claimed = ledger.tryClaim({
     id: "job-1",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: fake.repoPath,
+      orcaRepoId: "repo-1",
+      baseRef: "origin/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 1,
       title: "Issue 1",
@@ -266,16 +318,17 @@ repositories:
       labels: ["ready-for-agent"],
     },
     baseRef: "origin/main",
+    baseSha: "a".repeat(40),
     implementerProfileId: "pi-implementer",
   });
   assert.equal(claimed.ok, true);
-  ledger.updateJob("job-1", { base_sha: "a".repeat(40) });
   ledger.close();
   return {
     configPath,
     ledgerPath,
     lockPath: join(fake.dir, "harness.lock"),
     dir: fake.dir,
+    repoPath: fake.repoPath,
     calls: fake.calls,
   };
 }
@@ -284,8 +337,20 @@ function makeFakeOrca(listResponse: unknown): {
   command: string;
   calls: () => string[][];
   dir: string;
+  repoPath: string;
 } {
   const dir = mkdtempSync(join(tmpdir(), "harness-worktree-selection-"));
+  const repoPath = join(dir, "repo");
+  mkdirSync(repoPath);
+  execFileSync("git", ["init", repoPath]);
+  execFileSync("git", [
+    "-C",
+    repoPath,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  ]);
   const command = join(dir, "orca.cjs");
   const callsPath = join(dir, "calls.jsonl");
   const listPath = join(dir, "worktree-list.json");
@@ -300,6 +365,13 @@ const key = args.slice(0, 2).join(" ");
 const ok = (result) => console.log(JSON.stringify({ ok: true, result }));
 if (args[0] === "status") {
   ok({ app: { running: true }, runtime: { state: "ready", reachable: true } });
+} else if (key === "repo show") {
+  ok({ repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(repoPath)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } });
 } else if (key === "worktree list") {
   const response = JSON.parse(readFileSync(${JSON.stringify(listPath)}, "utf8"));
   console.log(JSON.stringify(response));
@@ -334,6 +406,7 @@ if (args[0] === "status") {
   return {
     command,
     dir,
+    repoPath,
     calls: () => {
       try {
         return readFileSync(callsPath, "utf8")
