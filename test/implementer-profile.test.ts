@@ -19,6 +19,8 @@ import {
   renderReworkSpec,
 } from "../src/prompts.js";
 
+const implementerLauncher = join(process.cwd(), "scripts/pi-implementer");
+
 test("controller-owned implementation skills stay pinned to Matt upstream", () => {
   const expectedHashes = new Map([
     [
@@ -105,7 +107,7 @@ test("active implementer uses the controller-owned Pi writer profile", (t) => {
   );
   chmodSync(fakePi, 0o755);
 
-  const result = spawnSync(profile.command!, ["--test-tail"], {
+  const result = spawnSync(implementerLauncher, ["--test-tail"], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -184,7 +186,6 @@ test("doctor fails closed after a non-interactive Pi profile startup", (t) => {
 });
 
 test("Pi implementer refuses an unpinned subagent extension", (t) => {
-  const profile = getImplementerProfile(loadConfig());
   const root = mkdtempSync(join(tmpdir(), "harness-pi-version-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
@@ -209,7 +210,7 @@ test("Pi implementer refuses an unpinned subagent extension", (t) => {
   writeFileSync(fakePi, `#!/bin/sh\ntouch "${markerPath}"\n`);
   chmodSync(fakePi, 0o755);
 
-  const result = spawnSync(profile.command!, [], {
+  const result = spawnSync(implementerLauncher, [], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -228,7 +229,6 @@ test("Pi implementer refuses an unpinned subagent extension", (t) => {
 });
 
 test("Pi implementer refuses missing runtime extensions", (t) => {
-  const profile = getImplementerProfile(loadConfig());
   const requiredPaths = [
     "extensions/orca-prefill.ts",
     "extensions/orca-agent-status.ts",
@@ -263,7 +263,7 @@ test("Pi implementer refuses missing runtime extensions", (t) => {
     writeFileSync(fakePi, `#!/bin/sh\ntouch "${markerPath}"\n`);
     chmodSync(fakePi, 0o755);
 
-    const result = spawnSync(profile.command!, [], {
+    const result = spawnSync(implementerLauncher, [], {
       encoding: "utf8",
       env: {
         ...process.env,

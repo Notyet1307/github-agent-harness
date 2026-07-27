@@ -11,15 +11,20 @@ import {
 import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { Ledger } from "../src/ledger.js";
 import { acquireLock } from "../src/lock.js";
 
-async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
+async function waitForFile(
+  path: string,
+  signal: AbortSignal,
+  timeoutMs = 30_000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await delay(20, undefined, { signal });
   }
 }
 
@@ -195,28 +200,46 @@ writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
   });
   child.stdout.on("data", (chunk) => (stdout += String(chunk)));
   child.stderr.on("data", (chunk) => (stderr += String(chunk)));
-  const exitPromise = new Promise<number | null>((resolve) =>
-    child.once("exit", resolve),
+  const closePromise = new Promise<number | null>((resolve) =>
+    child.once("close", resolve),
   );
+  const markerWait = new AbortController();
 
-  await waitForFile(markerPath);
-  const competingLock = acquireLock(lockPath);
-  if (competingLock.ok) competingLock.release();
-  writeFileSync(releasePath, "continue");
+  try {
+    await Promise.race([
+      waitForFile(markerPath, markerWait.signal),
+      closePromise.then((exitCode) => {
+        throw new Error(
+          `child closed before writing ${markerPath} (exit ${exitCode})\n` +
+            `stdout:\n${stdout}\nstderr:\n${stderr}`,
+        );
+      }),
+    ]);
+    markerWait.abort();
 
-  const exitCode = await exitPromise;
+    const competingLock = acquireLock(lockPath);
+    if (competingLock.ok) competingLock.release();
+    writeFileSync(releasePath, "continue");
 
-  assert.equal(
-    competingLock.ok,
-    true,
-    competingLock.error ?? "lock was unavailable during merge poll sleep",
-  );
-  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
-  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
-    ok: boolean;
-  };
-  assert.equal(result.ok, true);
-  const after = new Ledger(ledgerPath);
-  assert.equal(after.getJob("job-1")?.state, "merged");
-  after.close();
+    const exitCode = await closePromise;
+
+    assert.equal(
+      competingLock.ok,
+      true,
+      competingLock.error ?? "lock was unavailable during merge poll sleep",
+    );
+    assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+    const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+      ok: boolean;
+    };
+    assert.equal(result.ok, true);
+    const after = new Ledger(ledgerPath);
+    assert.equal(after.getJob("job-1")?.state, "merged");
+    after.close();
+  } finally {
+    markerWait.abort();
+    if (!existsSync(releasePath)) writeFileSync(releasePath, "continue");
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await closePromise;
+  }
 });

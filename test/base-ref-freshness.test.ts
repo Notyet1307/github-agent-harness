@@ -19,7 +19,7 @@ test("refreshBaseRef updates a stale remote-tracking ref", (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const remote = join(dir, "remote.git");
-  git(dir, "init", "--bare", remote);
+  git(dir, "init", "--bare", "-b", "main", remote);
 
   const author = join(dir, "author");
   mkdirSync(author);
@@ -68,7 +68,7 @@ test("runOnce blocks a worktree created from a different base SHA", (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const remote = join(dir, "remote.git");
-  git(dir, "init", "--bare", remote);
+  git(dir, "init", "--bare", "-b", "main", remote);
 
   const author = join(dir, "author");
   mkdirSync(author);
@@ -260,7 +260,7 @@ test("runOnce blocks incomplete worktree provenance without moving the pinned ba
   t.after(() => rmSync(dir, { recursive: true, force: true }));
 
   const remote = join(dir, "remote.git");
-  git(dir, "init", "--bare", remote);
+  git(dir, "init", "--bare", "-b", "main", remote);
 
   const author = join(dir, "author");
   mkdirSync(author);
