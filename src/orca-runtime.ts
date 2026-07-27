@@ -36,6 +36,9 @@ export type OrchestrationMessage = {
   [key: string]: unknown;
 };
 
+const DECISION_GATE_REPLY =
+  "Continue within the assigned task, scope, and restrictions. Use your best judgment and choose the safest minimal approach.";
+
 type DispatchAttemptFailure = {
   ok: false;
   error: string;
@@ -1178,8 +1181,33 @@ export function waitWorkerDone(
         };
       }
       if (type === "decision_gate" && taskMatches) {
+        const gateId = asNonEmptyString(msg.id);
+        if (!gateId) {
+          return {
+            ok: false,
+            error: `decision_gate missing message id for task ${input.taskId}`,
+            message: msg,
+          };
+        }
+        const reply = orcaJson(orcaCli, [
+          "orchestration",
+          "reply",
+          "--id",
+          gateId,
+          "--body",
+          DECISION_GATE_REPLY,
+          "--from",
+          input.controllerHandle,
+        ]);
+        if (!reply.ok) {
+          return {
+            ok: false,
+            error: `decision_gate reply failed for task ${input.taskId} (message ${gateId}): ${reply.error ?? "unknown Orca error"}`,
+            message: msg,
+          };
+        }
         input.onTick?.(
-          `worker raised decision_gate for task ${input.taskId}; continuing to wait`,
+          `replied to decision_gate ${gateId} for task ${input.taskId}; continuing to wait`,
         );
         continue;
       }
