@@ -8,7 +8,10 @@ import {
   waitWorkerDone,
 } from "../src/orca-runtime.js";
 
-test("keeps waiting after decision_gate until the same task sends worker_done", () => {
+const EXPECTED_DECISION_GATE_REPLY =
+  "Continue within the assigned task, scope, and restrictions. Use your best judgment and choose the safest minimal approach.";
+
+test("replies to decision_gate before waiting for the same task worker_done", () => {
   const fake = makeFakeOrca("decision-then-done");
   const result = waitWorkerDone(fake.command, {
     controllerHandle: "controller-1",
@@ -17,15 +20,100 @@ test("keeps waiting after decision_gate until the same task sends worker_done", 
     timeoutMs: 3_000,
   });
 
-  assert.equal(result.ok, true);
+  assert.deepEqual(result, {
+    ok: true,
+    message: {
+      type: "worker_done",
+      taskId: "task-1",
+      dispatchId: "dispatch-1",
+    },
+  });
+  const lifecycleCalls = fake.calls().filter(
+    (args) =>
+      args[0] === "orchestration" &&
+      (args[1] === "check" || args[1] === "reply"),
+  );
+  assert.deepEqual(
+    lifecycleCalls.map((args) => args[1]),
+    ["check", "reply", "check"],
+  );
+  assert.deepEqual(lifecycleCalls[1], [
+    "orchestration",
+    "reply",
+    "--id",
+    "gate-1",
+    "--body",
+    EXPECTED_DECISION_GATE_REPLY,
+    "--from",
+    "controller-1",
+  ]);
+});
+
+test("fails decision_gate without a top-level message id", () => {
+  const fake = makeFakeOrca("decision-missing-id");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
   assert.equal(
-    fake
-      .calls()
-      .filter(
-        (args) =>
-          args[0] === "orchestration" && args[1] === "check",
-      ).length,
-    2,
+    result.error,
+    "decision_gate missing message id for task task-1",
+  );
+  assert.deepEqual(result.message, {
+    type: "decision_gate",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    payload: { id: "payload-gate-1" },
+  });
+  const calls = fake.calls();
+  assert.equal(
+    calls.filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "reply",
+    ).length,
+    0,
+  );
+  assert.equal(
+    calls.filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "check",
+    ).length,
+    1,
+  );
+});
+
+test("fails immediately when decision_gate reply fails", () => {
+  const fake = makeFakeOrca("decision-reply-fails");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    timeoutMs: 3_000,
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(
+    result.error,
+    "decision_gate reply failed for task task-1 (message gate-1): reply unavailable",
+  );
+  assert.deepEqual(result.message, {
+    id: "gate-1",
+    type: "decision_gate",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+  });
+  assert.equal(
+    fake.calls().filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "check",
+    ).length,
+    1,
   );
 });
 
@@ -35,7 +123,7 @@ test("ignores stale, malformed, conflicting, or wrong-type completion payloads",
     controllerHandle: "controller-1",
     taskId: "task-current",
     dispatchId: "dispatch-current",
-    timeoutMs: 3_000,
+    timeoutMs: 10_000,
   });
 
   assert.equal(result.ok, true);
@@ -324,6 +412,8 @@ function makeFakeOrca(
     | "task-update-fails"
     | "existing-task"
     | "decision-then-done"
+    | "decision-missing-id"
+    | "decision-reply-fails"
     | "stale-string-then-done"
     | "task-only-done"
     | "missing-dispatch-id"
@@ -424,13 +514,31 @@ if (key === "terminal wait") {
   } else {
     console.log(JSON.stringify({ ok: true, result: {} }));
   }
-} else if (key === "orchestration check" && mode === "decision-then-done") {
+} else if (key === "orchestration reply") {
+  if (mode === "decision-reply-fails") {
+    console.log(JSON.stringify({ ok: false, error: { message: "reply unavailable" } }));
+    process.exitCode = 1;
+  } else {
+    console.log(JSON.stringify({ ok: true, result: {} }));
+  }
+} else if (
+  key === "orchestration check" &&
+  (mode === "decision-then-done" || mode === "decision-reply-fails")
+) {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));
   console.log(JSON.stringify({ ok: true, result: { messages: [{
+    ...(state.checks === 1 ? { id: "gate-1" } : {}),
     type: state.checks === 1 ? "decision_gate" : "worker_done",
     taskId: "task-1",
     dispatchId: "dispatch-1"
+  }] } }));
+} else if (key === "orchestration check" && mode === "decision-missing-id") {
+  console.log(JSON.stringify({ ok: true, result: { messages: [{
+    type: "decision_gate",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    payload: { id: "payload-gate-1" }
   }] } }));
 } else if (key === "orchestration check" && mode === "stale-string-then-done") {
   state.checks += 1;
