@@ -12,11 +12,13 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Ledger } from "../src/ledger.js";
+import { testProject } from "./support.js";
 import {
   IMPLEMENT_NO_COMMITS_ERROR,
   reconcileJob,
 } from "../src/reconcile.js";
 import { recover } from "../src/recover.js";
+import { runRecoveryCycle } from "../src/recovery.js";
 import { runOnce } from "../src/run-once.js";
 
 /**
@@ -142,7 +144,7 @@ test("ledger fixture: active implementing blocks new claim", () => {
   try {
     const claim = ledger.tryClaim({
       id: "job1",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: {
         number: 7,
         title: "t",
@@ -152,6 +154,7 @@ test("ledger fixture: active implementing blocks new claim", () => {
         labels: ["ready-for-agent"],
       },
       baseRef: "origin/main",
+      baseSha: "aaa",
       implementerProfileId: "codex-default",
     });
     assert.equal(claim.ok, true);
@@ -165,7 +168,7 @@ test("ledger fixture: active implementing blocks new claim", () => {
 
     const second = ledger.tryClaim({
       id: "job2",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: {
         number: 8,
         title: "t2",
@@ -175,6 +178,7 @@ test("ledger fixture: active implementing blocks new claim", () => {
         labels: ["ready-for-agent"],
       },
       baseRef: "origin/main",
+      baseSha: "bbb",
       implementerProfileId: "codex-default",
     });
     assert.equal(second.ok, false);
@@ -195,6 +199,13 @@ test("explicit retry redispatches in the recorded worktree and preserves partial
   git(worktree, "init", "-b", "main");
   git(worktree, "config", "user.name", "Harness Test");
   git(worktree, "config", "user.email", "harness@example.test");
+  git(
+    worktree,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
   writeFileSync(join(worktree, "value.txt"), "base\n");
   git(worktree, "add", "value.txt");
   git(worktree, "commit", "-m", "base");
@@ -221,6 +232,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo show") {
+  console.log(JSON.stringify({ ok: true, result: { repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(worktree)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } } }));
 } else if (key === "orchestration task-list") {
   if (mode === "diverge-after-hints") {
     const tree = execFileSync(
@@ -351,7 +369,13 @@ repositories:
   const ledger = new Ledger(ledgerPath);
   const claimed = ledger.tryClaim({
     id: "job-retry",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: worktree,
+      orcaRepoId: "repo-1",
+      baseRef: "origin/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 10,
       title: "Retry implementation",
@@ -361,6 +385,7 @@ repositories:
       labels: ["ready-for-agent"],
     },
     baseRef: "origin/main",
+    baseSha,
     implementerProfileId: "codex-default",
   });
   assert.equal(claimed.ok, true);
@@ -399,6 +424,9 @@ repositories:
   );
   assert.equal(failedLedger.getJob("job-retry")?.dispatch_attempt, 1);
   failedLedger.close();
+  const beforeDryRun = new Ledger(ledgerPath);
+  const beforeDryRunRevision = beforeDryRun.getJob("job-retry")?.revision;
+  beforeDryRun.close();
   const blocked = recover({
     configPath,
     ledgerPath,
@@ -406,6 +434,12 @@ repositories:
     dryRun: true,
   });
   assert.equal(blocked.action.kind, "blocked");
+  const afterBlockedDryRun = new Ledger(ledgerPath);
+  assert.equal(
+    afterBlockedDryRun.getJob("job-retry")?.revision,
+    beforeDryRunRevision,
+  );
+  afterBlockedDryRun.close();
 
   const retryLedger = new Ledger(ledgerPath);
   retryLedger.updateJob("job-retry", {
@@ -482,9 +516,10 @@ repositories:
     lockPath: join(dir, "harness.lock"),
     dryRun: false,
   });
-  assert.equal(liveTask.action.kind, "finalize_implement");
+  assert.equal(liveTask.action.kind, "blocked");
+  assert.equal(liveTask.executed, false);
   assert.equal(liveTask.ok, false);
-  assert.match(liveTask.message, /must be completed.*working/);
+  assert.equal(liveTask.message, IMPLEMENT_NO_COMMITS_ERROR);
   const liveVerified = new Ledger(ledgerPath);
   assert.equal(liveVerified.getJob("job-retry")?.state, "blocked");
   assert.equal(
@@ -527,7 +562,8 @@ repositories:
     dryRun: false,
   });
 
-  assert.equal(dirtyFinalize.action.kind, "finalize_implement");
+  assert.equal(dirtyFinalize.action.kind, "blocked");
+  assert.equal(dirtyFinalize.executed, false);
   assert.equal(dirtyFinalize.ok, false);
   const dirtyVerified = new Ledger(ledgerPath);
   assert.equal(dirtyVerified.getJob("job-retry")?.state, "blocked");
@@ -546,6 +582,19 @@ repositories:
   });
   finalizableLedger.close();
   writeFileSync(modePath, "success");
+
+  const automaticFinalize = runRecoveryCycle({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    dryRun: false,
+    mode: "automatic",
+  });
+  assert.equal(automaticFinalize.action.kind, "finalize_implement");
+  assert.equal(automaticFinalize.executed, false);
+  const afterAutomatic = new Ledger(ledgerPath);
+  assert.equal(afterAutomatic.getJob("job-retry")?.state, "blocked");
+  afterAutomatic.close();
 
   const finalized = recover({
     configPath,
@@ -610,7 +659,7 @@ repositories:
   });
   assert.equal(divergentResult.ok, false);
   assert.equal(divergentResult.action.kind, "blocked");
-  assert.equal(divergentResult.executed, false);
+  assert.equal(divergentResult.executed, true);
   const blockedDivergence = new Ledger(ledgerPath);
   assert.equal(blockedDivergence.getJob("job-retry")?.state, "blocked");
   blockedDivergence.close();
@@ -640,10 +689,10 @@ repositories:
     dryRun: false,
   });
 
-  assert.equal(raced.action.kind, "finalize_implement");
+  assert.equal(raced.action.kind, "blocked");
   assert.equal(raced.executed, true);
   assert.equal(raced.ok, false);
-  assert.match(raced.message, /not a descendant/i);
+  assert.match(raced.message, /not an ancestor/i);
   const terminalListsAfterRace =
     readFileSync(callsPath, "utf8").match(/\["terminal","list"/g)?.length ?? 0;
   assert.equal(terminalListsAfterRace, terminalListsBeforeRace);
@@ -698,6 +747,13 @@ test("recover executes a completed blocked audit result through the gate", (t) =
   git(worktree, "init", "-b", "main");
   git(worktree, "config", "user.name", "Harness Test");
   git(worktree, "config", "user.email", "harness@example.test");
+  git(
+    worktree,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
   writeFileSync(join(worktree, "value.txt"), "base\n");
   git(worktree, "add", "value.txt");
   git(worktree, "commit", "-m", "base");
@@ -753,6 +809,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo show") {
+  console.log(JSON.stringify({ ok: true, result: { repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(worktree)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } } }));
 } else if (key === "orchestration task-list") {
   if (mode === "diverge-after-hints") {
     const tree = execFileSync(
@@ -832,7 +895,13 @@ repositories:
   const ledger = new Ledger(ledgerPath);
   const claimed = ledger.tryClaim({
     id: "job-audit",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: worktree,
+      orcaRepoId: "repo-1",
+      baseRef: "origin/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 8,
       title: "Audit recovery",
@@ -842,6 +911,7 @@ repositories:
       labels: ["ready-for-agent"],
     },
     baseRef: "origin/main",
+    baseSha,
     implementerProfileId: "codex-default",
   });
   assert.equal(claimed.ok, true);
@@ -894,15 +964,15 @@ repositories:
     dryRun: false,
   });
 
-  assert.equal(raced.action.kind, "audit_once");
-  assert.equal(raced.executed, false);
+  assert.equal(raced.action.kind, "blocked");
+  assert.equal(raced.executed, true);
   assert.equal(raced.ok, false);
-  assert.match(raced.message, /not a descendant/i);
+  assert.match(raced.message, /not an ancestor/i);
   const raceVerified = new Ledger(ledgerPath);
   assert.equal(raceVerified.getJob("job-audit")?.state, "blocked");
   assert.match(
     raceVerified.getJob("job-audit")?.last_error ?? "",
-    /not a descendant/i,
+    /not an ancestor/i,
   );
   raceVerified.close();
 });

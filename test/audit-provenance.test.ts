@@ -9,12 +9,14 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { auditOnce } from "../src/audit-once.js";
 import { recover } from "../src/recover.js";
 import { Ledger } from "../src/ledger.js";
+import { acquireLock } from "../src/lock.js";
 import { publishOnce } from "../src/publisher.js";
 import type { AuditResult } from "../src/types.js";
 
@@ -47,8 +49,10 @@ type AuditFixtureMode =
   | "rework-late-failed"
   | "rework-pending-failed"
   | "rework-retry-drift"
+  | "rework-dispatch-lock-wait"
   | "rework-stale-terminal"
   | "audit-retry"
+  | "audit-retry-lock-wait"
   | "audit-retry-artifact-race";
 
 test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
@@ -84,6 +88,162 @@ test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) =>
   );
   assert.equal(verified.getJob("job-audit")?.auditor_dispatch_id, null);
   assert.equal(verified.getJob("job-audit")?.dispatch_attempt, 1);
+  verified.close();
+});
+
+test("auditOnce releases dispatch wait lock and preserves newer job facts", async (t) => {
+  const fixture = createAuditFixture(
+    (baseSha, headSha) => auditResult("pass", baseSha, headSha),
+    "audit-retry-lock-wait",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const lockPath = join(fixture.dir, "harness.lock");
+  const markerPath = join(fixture.dir, "audit-dispatch-waiting");
+  const releasePath = join(fixture.dir, "release-audit-dispatch");
+  const resultPath = join(fixture.dir, "audit-result-output.json");
+  const runnerPath = join(fixture.dir, "audit-runner.mjs");
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "awaiting_audit",
+    base_sha: fixture.baseSha,
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: fixture.headSha,
+  });
+  ledger.close();
+  const auditModuleUrl = pathToFileURL(
+    join(process.cwd(), "src", "audit-once.ts"),
+  ).href;
+  writeFileSync(
+    runnerPath,
+    `import { writeFileSync } from "node:fs";
+import { auditOnce } from ${JSON.stringify(auditModuleUrl)};
+const result = auditOnce({
+  configPath: ${JSON.stringify(fixture.configPath)},
+  ledgerPath: ${JSON.stringify(fixture.ledgerPath)},
+  lockPath: ${JSON.stringify(lockPath)},
+  withRework: false,
+});
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, ["--import", "tsx", runnerPath], {
+    cwd: process.cwd(),
+  });
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exitPromise = new Promise<number | null>((resolve) =>
+    child.once("exit", resolve),
+  );
+
+  await waitForAuditFile(markerPath);
+  const competingLock = acquireLock(lockPath);
+  if (competingLock.ok) {
+    const concurrent = new Ledger(fixture.ledgerPath);
+    concurrent.updateJob("job-audit", {
+      last_error: "newer audit coordinator fact",
+    });
+    concurrent.close();
+    competingLock.release();
+  }
+  writeFileSync(releasePath, "continue");
+  const exitCode = await exitPromise;
+
+  assert.equal(
+    competingLock.ok,
+    true,
+    competingLock.error ?? "lock unavailable during audit dispatch wait",
+  );
+  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+    ok: boolean;
+    message: string;
+  };
+  assert.equal(result.ok, false);
+  assert.match(result.message, /job changed while waiting for audit dispatch/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "auditing");
+  assert.equal(
+    verified.getJob("job-audit")?.last_error,
+    "newer audit coordinator fact",
+  );
+  verified.close();
+});
+
+test("rework releases dispatch wait lock and preserves newer job facts", async (t) => {
+  const fixture = createAuditFixture(
+    (baseSha, headSha) => actionableAuditFailure(baseSha, headSha),
+    "rework-dispatch-lock-wait",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture, false);
+  const lockPath = join(fixture.dir, "harness.lock");
+  const markerPath = join(fixture.dir, "rework-dispatch-waiting");
+  const releasePath = join(fixture.dir, "release-rework-dispatch");
+  const resultPath = join(fixture.dir, "rework-result-output.json");
+  const runnerPath = join(fixture.dir, "rework-runner.mjs");
+  const auditModuleUrl = pathToFileURL(
+    join(process.cwd(), "src", "audit-once.ts"),
+  ).href;
+  writeFileSync(
+    runnerPath,
+    `import { writeFileSync } from "node:fs";
+import { auditOnce } from ${JSON.stringify(auditModuleUrl)};
+const result = auditOnce({
+  configPath: ${JSON.stringify(fixture.configPath)},
+  ledgerPath: ${JSON.stringify(fixture.ledgerPath)},
+  lockPath: ${JSON.stringify(lockPath)},
+  withRework: true,
+});
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, ["--import", "tsx", runnerPath], {
+    cwd: process.cwd(),
+  });
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exitPromise = new Promise<number | null>((resolve) =>
+    child.once("exit", resolve),
+  );
+
+  await waitForAuditFile(markerPath);
+  const competingLock = acquireLock(lockPath);
+  if (competingLock.ok) {
+    const concurrent = new Ledger(fixture.ledgerPath);
+    concurrent.updateJob("job-audit", {
+      last_error: "newer rework coordinator fact",
+    });
+    concurrent.close();
+    competingLock.release();
+  }
+  writeFileSync(releasePath, "continue");
+  const exitCode = await exitPromise;
+
+  assert.equal(
+    competingLock.ok,
+    true,
+    competingLock.error ?? "lock unavailable during rework dispatch wait",
+  );
+  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+    ok: boolean;
+    message: string;
+  };
+  assert.equal(result.ok, false);
+  assert.match(result.message, /job changed while waiting for rework dispatch/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "reworking");
+  assert.equal(
+    verified.getJob("job-audit")?.last_error,
+    "newer rework coordinator fact",
+  );
   verified.close();
 });
 
@@ -1019,10 +1179,10 @@ test("malformed audit recovery stops when the artifact changes after planning", 
     dryRun: false,
   });
 
-  assert.equal(recovered.action.kind, "audit_once");
+  assert.equal(recovered.action.kind, "blocked");
   assert.equal(recovered.ok, false);
   assert.equal(recovered.executed, false);
-  assert.match(recovered.message, /artifact changed to current/);
+  assert.match(recovered.message, /standards finding lists are invalid/);
   const verified = new Ledger(fixture.ledgerPath);
   assert.equal(verified.getJob("job-audit")?.state, "blocked");
   verified.close();
@@ -1044,6 +1204,13 @@ function createAuditFixture(
   git(worktree, "init", "-b", "main");
   git(worktree, "config", "user.name", "Harness Test");
   git(worktree, "config", "user.email", "harness@example.test");
+  git(
+    worktree,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
   writeFileSync(join(worktree, "value.txt"), "base\n");
   git(worktree, "add", "value.txt");
   git(worktree, "commit", "-m", "base");
@@ -1073,7 +1240,7 @@ function createAuditFixture(
   writeFileSync(
     fakeOrca,
     `#!/usr/bin/env node
-const { appendFileSync, readFileSync, writeFileSync } = require("node:fs");
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { execFileSync } = require("node:child_process");
 const { dirname, join } = require("node:path");
 const dir = dirname(process.argv[1]);
@@ -1090,6 +1257,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo show") {
+  console.log(JSON.stringify({ ok: true, result: { repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(worktree)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } } }));
 } else if (key === "terminal list") {
   console.log(JSON.stringify({ ok: true, result: {
     terminals:
@@ -1116,6 +1290,24 @@ if (args[0] === "status") {
     } }));
   }
 } else if (key === "terminal read") {
+  const dispatchWaitMode =
+    mode === "audit-retry-lock-wait" ||
+    mode === "rework-dispatch-lock-wait";
+  if (dispatchWaitMode && state.tasks > 0) {
+    const auditWait = mode === "audit-retry-lock-wait";
+    writeFileSync(
+      join(dir, auditWait ? "audit-dispatch-waiting" : "rework-dispatch-waiting"),
+      "waiting"
+    );
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    const release = join(
+      dir,
+      auditWait ? "release-audit-dispatch" : "release-rework-dispatch"
+    );
+    while (!existsSync(release)) {
+      Atomics.wait(wait, 0, 0, 10);
+    }
+  }
   const fresh = args.includes("--cursor");
   if (mode === "rework-retry-drift" && fresh && !state.mutationApplied) {
     writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "retry drift\\n");
@@ -1461,7 +1653,13 @@ repositories:
   assert.equal(
     ledger.tryClaim({
       id: "job-audit",
-      repo: "owner/repo",
+      project: {
+        github: "owner/repo",
+        localPath: worktree,
+        orcaRepoId: "repo-1",
+        baseRef: "origin/main",
+        defaultBranch: "main",
+      },
       issue: {
         number: 9,
         title: "Audit provenance",
@@ -1471,6 +1669,7 @@ repositories:
         labels: ["ready-for-agent"],
       },
       baseRef: "origin/main",
+      baseSha,
       implementerProfileId: "codex-default",
     }).ok,
     true,
@@ -1576,6 +1775,14 @@ function isReworkCreation(args: string[]): boolean {
     (args[0] === "terminal" && args[1] === "create") ||
     (args[0] === "orchestration" && args[1] === "task-create")
   );
+}
+
+async function waitForAuditFile(path: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 function resetToUnrelatedCommit(worktree: string, message: string): string {

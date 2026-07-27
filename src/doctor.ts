@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
-import { HARNESS_ROOT, loadConfig } from "./config.js";
+import { defaultConfigPath, HARNESS_ROOT, loadConfig } from "./config.js";
 import { execFile, which } from "./exec.js";
 import { ghAuthOk } from "./github.js";
-import { orcaJson, orcaStatus, resolveOrcaCli } from "./orca.js";
+import { orcaStatus, resolveOrcaCli } from "./orca.js";
+import { planProjectAdd } from "./project.js";
 import type { HarnessConfig, RepoConfig } from "./types.js";
 // profiles validated inside loadConfig
 
@@ -323,7 +324,7 @@ export function runDoctor(configPath?: string): DoctorReport {
   }
 
   for (const repo of config.repositories) {
-    checks.push(...checkRepo(config, repo, orcaCli));
+    checks.push(...checkRepo(config, repo, configPath));
   }
 
   const ok = checks.every((c) => c.level !== "fail");
@@ -333,33 +334,46 @@ export function runDoctor(configPath?: string): DoctorReport {
 function checkRepo(
   config: HarnessConfig,
   repo: RepoConfig,
-  orcaCli: string | null,
+  configPath?: string,
 ): Check[] {
   const checks: Check[] = [];
   const prefix = `repo:${repo.github}`;
-
-  if (!existsSync(repo.localPath)) {
+  const enrollment = planProjectAdd({
+    configPath: configPath ?? defaultConfigPath(),
+    github: repo.github,
+    localPath: repo.localPath,
+    defaultBranch: repo.defaultBranch,
+    baseRef: repo.baseRef,
+    dryRun: true,
+  });
+  for (const check of enrollment.checks) {
     checks.push({
-      name: `${prefix}:localPath`,
-      level: "fail",
-      detail: `missing ${repo.localPath}`,
+      name: `${prefix}:${check.name}`,
+      level: check.ok ? "ok" : "fail",
+      detail: check.detail,
     });
-    return checks;
   }
-  checks.push({
-    name: `${prefix}:localPath`,
-    level: "ok",
-    detail: repo.localPath,
-  });
+  if (!enrollment.ok) {
+    checks.push({
+      name: `${prefix}:enrollment`,
+      level: "fail",
+      detail: enrollment.message,
+    });
+  } else if (enrollment.actions.length > 0) {
+    checks.push({
+      name: `${prefix}:enrollment`,
+      level: "fail",
+      detail: `setup required: ${enrollment.actions.map((action) => action.kind).join(", ")}`,
+    });
+  } else {
+    checks.push({
+      name: `${prefix}:enrollment`,
+      level: "ok",
+      detail: "project binding is current",
+    });
+  }
 
-  const remote = execFile("git", ["-C", repo.localPath, "remote", "-v"]);
-  checks.push({
-    name: `${prefix}:git-remote`,
-    level: remote.ok ? "ok" : "fail",
-    detail: remote.ok
-      ? remote.stdout.trim().split("\n")[0] ?? "ok"
-      : remote.stderr || remote.error || "git remote failed",
-  });
+  if (!existsSync(repo.localPath)) return checks;
 
   const agents =
     existsSync(join(repo.localPath, "AGENTS.md")) ||
@@ -403,49 +417,6 @@ function checkRepo(
         level: "warn",
         detail: `package.json parse failed: ${(err as Error).message}`,
       });
-    }
-  }
-
-  if (orcaCli) {
-    const shown = orcaJson(orcaCli, [
-      "repo",
-      "show",
-      "--repo",
-      `id:${repo.orcaRepoId}`,
-    ]);
-    if (!shown.ok) {
-      checks.push({
-        name: `${prefix}:orca-repo`,
-        level: "fail",
-        detail: shown.error ?? "orca repo show failed",
-      });
-    } else {
-      const data = shown.data as {
-        ok?: boolean;
-        result?: { repo?: { path?: string; worktreeBaseRef?: string; id?: string } };
-      };
-      const orcaPath = data.result?.repo?.path;
-      const baseRef = data.result?.repo?.worktreeBaseRef;
-      const pathOk = orcaPath === repo.localPath;
-      const baseOk = !baseRef || baseRef === repo.baseRef;
-      checks.push({
-        name: `${prefix}:orca-repo`,
-        level: data.ok && pathOk ? "ok" : "fail",
-        detail: `id=${repo.orcaRepoId} path=${orcaPath ?? "?"} baseRef=${baseRef ?? "(unset)"}`,
-      });
-      if (!baseOk) {
-        checks.push({
-          name: `${prefix}:orca-base-ref`,
-          level: "warn",
-          detail: `orca baseRef=${baseRef} config baseRef=${repo.baseRef}`,
-        });
-      } else if (baseRef) {
-        checks.push({
-          name: `${prefix}:orca-base-ref`,
-          level: "ok",
-          detail: baseRef,
-        });
-      }
     }
   }
 

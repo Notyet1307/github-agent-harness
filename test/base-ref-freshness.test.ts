@@ -84,6 +84,14 @@ test("runOnce blocks a worktree created from a different base SHA", (t) => {
   const repo = join(dir, "repo");
   const staleWorktree = join(dir, "stale-worktree");
   git(dir, "clone", remote, repo);
+  git(repo, "remote", "rename", "origin", "upstream");
+  git(
+    repo,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
   git(dir, "clone", remote, staleWorktree);
   const staleSha = git(staleWorktree, "rev-parse", "HEAD");
 
@@ -102,7 +110,7 @@ test("runOnce blocks a worktree created from a different base SHA", (t) => {
     `#!/usr/bin/env node
 const { execFileSync } = require("node:child_process");
 const args = process.argv.slice(2);
-const actual = execFileSync("git", ["-C", ${JSON.stringify(repo)}, "rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+const actual = execFileSync("git", ["-C", ${JSON.stringify(repo)}, "rev-parse", "upstream/main"], { encoding: "utf8" }).trim();
 if (actual !== ${JSON.stringify(expectedSha)}) {
   process.stderr.write("base ref was not refreshed before GitHub selection");
   process.exit(1);
@@ -146,6 +154,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo show") {
+  console.log(JSON.stringify({ ok: true, result: { repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(repo)},
+    worktreeBaseRef: "upstream/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } } }));
 } else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${dir}`)})) {
   console.log(JSON.stringify({ ok: true, result: {
     terminals: [{ handle: "controller-1", title: "test-controller", connected: true }]
@@ -211,7 +226,7 @@ repositories:
   - github: owner/repo
     localPath: ${JSON.stringify(repo)}
     orcaRepoId: repo-1
-    baseRef: origin/main
+    baseRef: upstream/main
     defaultBranch: main
 `,
   );
@@ -260,13 +275,27 @@ test("runOnce blocks incomplete worktree provenance without moving the pinned ba
 
   const repo = join(dir, "repo");
   git(dir, "clone", remote, repo);
-  const pinnedSha = git(repo, "rev-parse", "origin/main");
+  git(repo, "remote", "rename", "origin", "upstream");
+  git(
+    repo,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
+  const pinnedSha = git(repo, "rev-parse", "upstream/main");
 
   const ledgerPath = join(dir, "harness.sqlite");
   const ledger = new Ledger(ledgerPath);
   const claimed = ledger.tryClaim({
     id: "partial-worktree-job",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: repo,
+      orcaRepoId: "repo-1",
+      baseRef: "upstream/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 10,
       title: "Partial worktree provenance",
@@ -275,7 +304,7 @@ test("runOnce blocks incomplete worktree provenance without moving the pinned ba
       labels: ["ready-for-agent"],
       blockedBy: [],
     },
-    baseRef: "origin/main",
+    baseSha: pinnedSha,
     implementerProfileId: "codex-default",
   });
   assert.equal(claimed.ok, true);
@@ -296,11 +325,19 @@ test("runOnce blocks incomplete worktree provenance without moving the pinned ba
     fakeOrca,
     `#!/usr/bin/env node
 const args = process.argv.slice(2).filter((arg) => arg !== "--json");
+const key = args.slice(0, 2).join(" ");
 if (args[0] === "status") {
   console.log(JSON.stringify({ ok: true, result: {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo show") {
+  console.log(JSON.stringify({ ok: true, result: { repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(repo)},
+    worktreeBaseRef: "upstream/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } } }));
 } else {
   console.log(JSON.stringify({ ok: false, error: {
     message: "unexpected Orca call after partial worktree detection"
@@ -342,7 +379,7 @@ repositories:
   - github: owner/repo
     localPath: ${JSON.stringify(repo)}
     orcaRepoId: repo-1
-    baseRef: origin/main
+    baseRef: upstream/main
     defaultBranch: main
 `,
   );
@@ -367,7 +404,13 @@ repositories:
   const recoveryLedger = new Ledger(recoveryLedgerPath);
   const recoveryClaim = recoveryLedger.tryClaim({
     id: "unrecorded-worktree-job",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: repo,
+      orcaRepoId: "repo-1",
+      baseRef: "upstream/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 11,
       title: "Unrecorded worktree",
@@ -376,7 +419,7 @@ repositories:
       labels: ["ready-for-agent"],
       blockedBy: [],
     },
-    baseRef: "origin/main",
+    baseSha: pinnedSha,
     implementerProfileId: "codex-default",
   });
   assert.equal(recoveryClaim.ok, true);
@@ -394,7 +437,7 @@ repositories:
   const recovered = new Ledger(recoveryLedgerPath);
   assert.equal(recovered.getActiveJob()?.base_sha, pinnedSha);
   assert.equal(
-    git(repo, "rev-parse", "refs/remotes/origin/main"),
+    git(repo, "rev-parse", "refs/remotes/upstream/main"),
     pinnedSha,
   );
   assert.notEqual(pinnedSha, latestSha);

@@ -4,7 +4,8 @@ import {
   IMPLEMENT_NO_COMMITS_ERROR,
   reconcileJob,
 } from "../src/reconcile.js";
-import { planWatchCycle } from "../src/watch.js";
+import { planWatchCycle, runWatchCycle } from "../src/watch.js";
+import { WorkCoordinator } from "../src/work.js";
 import type { Job } from "../src/types.js";
 
 test("none → claim_and_implement", () => {
@@ -76,4 +77,39 @@ test("run_once/audit/publish/wait_merge → resume", () => {
 test("noop → noop_sleep", () => {
   const p = planWatchCycle({ kind: "noop", reason: "merged" });
   assert.equal(p.step, "noop_sleep");
+});
+
+test("watch adapter consumes exactly one coordinator action per tick", () => {
+  let runOnceCalls = 0;
+  let recoveryExecuteCalls = 0;
+  const coordinator = new WorkCoordinator({
+    recover: (options) => {
+      if (!options.dryRun) recoveryExecuteCalls += 1;
+      return {
+        ok: true,
+        message: "no active job",
+        action: { kind: "none", reason: "no active job" },
+        details: { state: null },
+        executed: false,
+      };
+    },
+    runOnce: () => {
+      runOnceCalls += 1;
+      return {
+        ok: true,
+        jobId: "job-1",
+        message: "implementation complete",
+        details: { state: "awaiting_audit" },
+      };
+    },
+  });
+
+  const cycle = runWatchCycle({
+    coordinator,
+    log: () => {},
+  });
+
+  assert.equal(cycle.plan.step, "claim_and_implement");
+  assert.equal(runOnceCalls, 1);
+  assert.equal(recoveryExecuteCalls, 0);
 });

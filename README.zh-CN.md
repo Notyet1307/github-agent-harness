@@ -19,6 +19,7 @@ audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执�
 | 阶段 | 命令 | 状态 |
 |---|---|---|
 | M0 | `pnpm harness doctor` | 已实现：检查配置与运行环境 |
+| 项目接入 | `pnpm harness project add/setup` | 已实现：幂等绑定本地 Git 与 Orca |
 | M1 | `pnpm harness pick --dry-run` | 已实现：只读选取预览 |
 | M2 | `pnpm harness run-once` | 已实现：停在实现提交完成 |
 | M3 | `pnpm harness audit-once` | 已实现：Pi 双轴 audit 与 rework gate，不创建 PR |
@@ -40,8 +41,17 @@ pnpm harness pick --dry-run
 pnpm test
 ```
 
-主配置位于 [`config/harness.yaml`](config/harness.yaml)。开始真实任务前，应确保
-`doctor` 为 PASS，并先用 dry-run 核对将被领取的 issue。
+主配置位于 [`config/harness.yaml`](config/harness.yaml)。已有本地 clone 时，可用一条命令完成接入，无需人工查询 Orca id：
+
+```bash
+pnpm harness project add \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo
+```
+
+增加 `--dry-run` 可只读预览 Git、GitHub、Orca 与配置动作。`project setup --repo OWNER/REPO` 会重新验证并修复已有 Orca 注册/base-ref 绑定，`project setup --all` 会处理全部已配置仓库。项目接入不会 clone、领取 issue、固定 base SHA，也不会创建或修改 GitHub 标签。
+
+开始真实任务前，应确保 `doctor` 为 PASS，并先用 dry-run 核对将被领取的 issue。
 
 ## Wayfinder Map 选择
 
@@ -68,6 +78,7 @@ fallback 或嵌套 Map。
 
 | 命令 | 说明 |
 |---|---|
+| `pnpm harness work --once` | 重新检查后执行一个自动协调动作；绝不执行显式恢复 |
 | `pnpm harness run-once` | 领取 issue、创建或复用 worktree、完成实现；不 push、不建 PR |
 | `pnpm harness audit-once` | 运行独立 Pi audit，必要时执行受控 rework；不建 PR |
 | `pnpm harness publish-once` | audit 通过后 push 并创建或复用 PR，停在 `awaiting_merge` |
@@ -76,11 +87,21 @@ fallback 或嵌套 Map。
 | `pnpm harness recover --execute` | 执行已核对的恢复步骤 |
 | `pnpm harness status` | 显示 active job、最近 job 与 Orca 状态 |
 
-### 前台 Watch
+### 统一 Work 入口与前台 Watch
 
-> **注意：`watch` 是主动控制器，不是被动 merge monitor。** 没有 active job
-> 时，它会领取下一个带配置标签且未阻塞的 issue，派发 agent、运行 audit，并在
-> 后续周期 push 和创建 PR。
+`work` 是统一协调器入口。它在每个 cycle 前重新检查事实，每个 cycle 最多执行一个
+自动动作；遇到稳定状态、`awaiting_merge`、失败或需要显式恢复的动作就停止。使用
+`--once` 可限制为一个 cycle。
+
+```bash
+pnpm harness work --once
+pnpm harness work --repo OWNER/REPO --max-cycles 10 --poll-seconds 30
+pnpm harness work --dry-run --once
+```
+
+> **注意：`watch` 是主动的兼容控制器，不是被动 merge monitor。** 没有 active
+> job 时，它可以领取下一个带配置标签且未阻塞的 issue；后续 tick 可以派发 agent、
+> 运行 audit，并 push 和创建 PR。
 
 ```bash
 pnpm harness watch
@@ -93,18 +114,20 @@ pnpm harness watch --max-cycles 10 --poll-seconds 30
 来自 `pollIntervalSeconds`（当前默认 120 秒）。`SIGINT` 和 `SIGTERM` 会让它在
 当前周期结束后退出。
 
-每个周期：
+每个 `watch` tick：
 
 1. 对账 active job，与 `recover` 使用相同事实源。
-2. 有 active job 时，只恢复一个 ensure step：`run-once`、`audit-once`、
-   `publish-once` 或一次 `wait-merge` poll。
-3. 没有 active job 时，尝试领取并实现下一个 eligible issue；若实现同周期完成，
-   会立即串联一次 audit。
-4. PR 被人工合并后，下一次 poll 记录 `mergedAt` 并释放 ledger 单槽，但保留 Orca
+2. 最多执行一个自动协调动作：`run-once`、`audit-once`、`publish-once` 或一次
+   `wait-merge` poll。
+3. 没有 active job 时，尝试领取并实现下一个 eligible issue；后续 tick 重新检查后
+   才执行 audit，不在同一 tick 串联。
+4. 遇到显式恢复动作时停止；操作员必须先运行 `recover --dry-run`，再运行
+   `recover --execute`。
+5. PR 被人工合并后，下一次 poll 记录 `mergedAt` 并释放 ledger 单槽，但保留 Orca
    worktree 供检查。
-5. `blocked` job 继续占槽；CI 失败或 requested changes 不会在等待合并阶段自动
+6. `blocked` job 继续占槽；CI 失败或 requested changes 不会在等待合并阶段自动
    触发 rework。
-6. 永不自动 merge，也不自动删除已完成 worktree。
+7. 永不自动 merge，也不自动删除已完成 worktree。
 
 ### launchd 常驻服务（延后）
 
@@ -126,7 +149,8 @@ pnpm harness watch --max-cycles 10 --poll-seconds 30
 
 ## 恢复与可靠性
 
-Controller 崩溃后不要直接领取新 issue，先执行：
+Controller 崩溃后不要直接领取新 issue。`recover` 是显式恢复兼容 adapter；即使
+使用 `--execute`，没有 active job 时也不会领取新 issue。先执行：
 
 ```bash
 pnpm harness recover --dry-run

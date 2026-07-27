@@ -21,6 +21,7 @@ protection requirements are satisfied.
 | Milestone | Command | Status |
 |---|---|---|
 | M0 | `pnpm harness doctor` | Implemented: configuration and runtime checks |
+| Enrollment | `pnpm harness project add/setup` | Implemented: idempotent local Git + Orca binding |
 | M1 | `pnpm harness pick --dry-run` | Implemented: read-only picker preview |
 | M2 | `pnpm harness run-once` | Implemented: stops after implementation commits |
 | M3 | `pnpm harness audit-once` | Implemented: Pi two-axis audit and rework gate, no PR |
@@ -43,9 +44,23 @@ pnpm test
 ```
 
 The main configuration is
-[`config/harness.yaml`](config/harness.yaml). Before real work, require a
-passing `doctor` result and use the dry-run picker to verify the issue that
-would be claimed.
+[`config/harness.yaml`](config/harness.yaml). Add an existing local clone without
+manually looking up its Orca id:
+
+```bash
+pnpm harness project add \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo
+```
+
+Use `--dry-run` to inspect the Git, GitHub, Orca, and config actions without
+mutating anything. `project setup --repo OWNER/REPO` revalidates and repairs an
+existing Orca registration/base-ref binding; `project setup --all` processes all
+configured repositories. Enrollment never clones, claims an issue, pins a base
+SHA, or creates/modifies GitHub labels.
+
+Before real work, require a passing `doctor` result and use the dry-run picker to
+verify the issue that would be claimed.
 
 ## Wayfinder Map selection
 
@@ -78,6 +93,7 @@ pipeline.
 
 | Command | Description |
 |---|---|
+| `pnpm harness work --once` | Run one freshly inspected automatic coordinator action; never execute explicit recovery |
 | `pnpm harness run-once` | Claim an issue, create or reuse the worktree, and finish implementation; no push or PR |
 | `pnpm harness audit-once` | Run the independent Pi audit and controlled rework when needed; no PR |
 | `pnpm harness publish-once` | Push and create or reuse the PR after audit passes, then stop at `awaiting_merge` |
@@ -86,11 +102,22 @@ pipeline.
 | `pnpm harness recover --execute` | Execute the reconciled recovery step |
 | `pnpm harness status` | Show the active job, recent jobs, and Orca state |
 
-### Foreground watch
+### Unified work and foreground watch
 
-> **Warning: `watch` is an active controller, not a passive merge monitor.**
-> With no active job, it claims the next eligible labeled issue, dispatches
-> agents, runs the audit, and pushes and creates a PR in later cycles.
+`work` is the unified coordinator entrypoint. It re-inspects before every cycle,
+runs at most one automatic action per cycle, and stops at a stable state,
+`awaiting_merge`, a failure, or any action that requires explicit recovery.
+Use `--once` to limit it to one cycle.
+
+```bash
+pnpm harness work --once
+pnpm harness work --repo OWNER/REPO --max-cycles 10 --poll-seconds 30
+pnpm harness work --dry-run --once
+```
+
+> **Warning: `watch` is an active compatibility controller, not a passive merge
+> monitor.** With no active job, it can claim the next eligible labeled issue.
+> Later ticks can dispatch agents, run the audit, and push and create a PR.
 
 ```bash
 pnpm harness watch
@@ -104,18 +131,20 @@ terminal or process exits. The default interval comes from
 `pollIntervalSeconds` (currently 120 seconds). `SIGINT` and `SIGTERM` stop it
 after the current cycle.
 
-Each cycle:
+Each `watch` tick:
 
 1. Reconcile the active job from the same evidence used by `recover`.
-2. With an active job, resume one ensure step: `run-once`, `audit-once`,
+2. Execute at most one automatic coordinator action: `run-once`, `audit-once`,
    `publish-once`, or one `wait-merge` poll.
-3. With no active job, try to claim and implement the next eligible issue; if
-   implementation finishes in that cycle, chain one audit immediately.
-4. After a human merges the PR, the next poll records `mergedAt` and frees the
+3. With no active job, try to claim and implement the next eligible issue; a
+   later tick performs the audit after a fresh inspection.
+4. Stop rather than execute an explicit recovery action. The operator must use
+   `recover --dry-run` and then `recover --execute`.
+5. After a human merges the PR, the next poll records `mergedAt` and frees the
    single ledger slot, while retaining the Orca worktree for inspection.
-5. A `blocked` job keeps the slot. CI failures or requested changes do not
+6. A `blocked` job keeps the slot. CI failures or requested changes do not
    automatically trigger rework while waiting for merge.
-6. Never auto-merge and never auto-delete completed worktrees.
+7. Never auto-merge and never auto-delete completed worktrees.
 
 ### launchd service (deferred)
 
@@ -140,7 +169,9 @@ Before launchd is enabled, the production repository must at minimum:
 
 ## Recovery and reliability
 
-After a controller crash, do not claim a new issue directly. Run:
+After a controller crash, do not claim a new issue directly. `recover` is the
+explicit-recovery compatibility adapter; even `--execute` does not claim when
+there is no active job. Run:
 
 ```bash
 pnpm harness recover --dry-run

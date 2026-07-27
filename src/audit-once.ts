@@ -24,6 +24,7 @@ import {
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
+import { validateProjectRuntime } from "./project.js";
 import {
   dispatchTaskEnsured,
   ensureAgentTerminal,
@@ -31,6 +32,7 @@ import {
   orchestrationTaskStatus,
   setWorktreeProgress,
   waitWorkerDone,
+  type DispatchWait,
 } from "./orca-runtime.js";
 import { renderAuditorSpec, renderReworkSpec } from "./prompts.js";
 import type { HarnessConfig, Job, RepoConfig } from "./types.js";
@@ -45,6 +47,11 @@ export type AuditOnceResult = {
   };
 };
 
+type WaitLockOptions = {
+  lockPath: string;
+  releaseLock: () => void;
+};
+
 export function auditOnce(options: {
   configPath?: string;
   ledgerPath?: string;
@@ -53,7 +60,8 @@ export function auditOnce(options: {
   withRework?: boolean;
 }): AuditOnceResult {
   const config = loadConfig(options.configPath);
-  const lock = acquireLock(options.lockPath ?? defaultLockPath());
+  const lockPath = options.lockPath ?? defaultLockPath();
+  const lock = acquireLock(lockPath);
   if (!lock.ok) {
     return { ok: false, message: lock.error ?? "lock failed" };
   }
@@ -61,6 +69,8 @@ export function auditOnce(options: {
   try {
     return auditOnceLocked(config, ledger, {
       withRework: options.withRework ?? true,
+      lockPath,
+      releaseLock: lock.release,
     });
   } finally {
     ledger.close();
@@ -71,7 +81,11 @@ export function auditOnce(options: {
 function auditOnceLocked(
   config: HarnessConfig,
   ledger: Ledger,
-  options: { withRework: boolean },
+  options: {
+    withRework: boolean;
+    lockPath: string;
+    releaseLock: () => void;
+  },
 ): AuditOnceResult {
   const log = (msg: string) => {
     process.stdout.write(`[audit-once] ${msg}\n`);
@@ -86,6 +100,24 @@ function auditOnceLocked(
   let job = ledger.getActiveJob();
   if (!job) {
     return { ok: false, message: "no active job" };
+  }
+  const project = ledger.resolveJobProject(job.id, config.repositories);
+  if (!project.ok) {
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: project.error,
+    });
+    return { ok: false, jobId: job.id, message: project.error };
+  }
+  job = project.job;
+  const repo = project.project;
+  const runtime = validateProjectRuntime(repo, orcaCli);
+  if (!runtime.ok) {
+    job = ledger.updateJob(job.id, {
+      state: "blocked",
+      last_error: runtime.error,
+    });
+    return { ok: false, jobId: job.id, message: runtime.error };
   }
 
   if (job.state === "audit_passed") {
@@ -149,11 +181,6 @@ function auditOnceLocked(
     }
   }
 
-  const repo = config.repositories.find((r) => r.github === job!.repo);
-  if (!repo) {
-    return { ok: false, jobId: job.id, message: `repo not in config: ${job.repo}` };
-  }
-
   const auditor = getAuditorProfile(config);
   if (auditor.role !== "auditor" || !auditor.readonly) {
     return {
@@ -177,7 +204,16 @@ function auditOnceLocked(
   while (true) {
     // If reworking, finish implementer first
     if (job.state === "reworking") {
-      const rework = runReworkPhase(config, ledger, orcaCli, job, repo, implementer, log);
+      const rework = runReworkPhase(
+        config,
+        ledger,
+        orcaCli,
+        job,
+        repo,
+        implementer,
+        log,
+        options,
+      );
       if (!rework.ok) return rework;
       job = ledger.getJob(job.id)!;
     }
@@ -217,6 +253,7 @@ function auditOnceLocked(
       auditor,
       round,
       log,
+      options,
     );
     if (!audited.ok && !audited.details?.gateFail) {
       return audited;
@@ -303,6 +340,7 @@ function runAuditPhase(
   auditor: ReturnType<typeof getAuditorProfile>,
   round: number,
   log: (m: string) => void,
+  waitLock: WaitLockOptions,
 ): AuditOnceResult {
   if (!job.worktree_id || !job.worktree_path || !job.base_sha) {
     return {
@@ -314,6 +352,18 @@ function runAuditPhase(
   const worktreeId = job.worktree_id;
   const worktreePath = job.worktree_path;
   const baseSha = job.base_sha;
+  const jobChangedWhileWaiting = (): AuditOnceResult => ({
+    ok: false,
+    jobId: job.id,
+    message: "job changed while waiting for audit; retry coordination cycle",
+  });
+  const updateCurrentJob = (
+    patch: Parameters<Ledger["updateJob"]>[1],
+  ): Job | null => {
+    const updated = ledger.updateJobIf(job.id, job.revision, patch);
+    if (updated) job = updated;
+    return updated;
+  };
 
   const headSha = revParse(worktreePath, "HEAD");
   if (!headSha) {
@@ -479,6 +529,71 @@ function runAuditPhase(
               attempt: (job.dispatch_attempt === 2 ? 2 : 1) as 1 | 2,
             }
           : undefined;
+      let taskCreateGuardError: string | null = null;
+      let dispatchWaitError: string | null = null;
+      let dispatchWaitSnapshot: {
+        revision: number;
+        state: Job["state"];
+        taskId: string | null;
+        dispatchId: string | null;
+        terminalHandle: string | null;
+        auditRound: number;
+        auditHeadSha: string | null;
+      } | null = null;
+      const auditDispatchFixedPointError = (): string | null => {
+        const currentHead = revParse(worktreePath, "HEAD");
+        if (currentHead !== headSha) {
+          return (
+            "audit HEAD changed before dispatch: " +
+            `expected ${headSha}, got ${currentHead ?? "unreadable"}`
+          );
+        }
+        const dirty = trackedDirty(worktreePath);
+        return dirty ? `tracked files dirty before audit dispatch:\n${dirty}` : null;
+      };
+      const beforeDispatchWait = (_wait: DispatchWait) => {
+        dispatchWaitSnapshot = {
+          revision: job.revision,
+          state: job.state,
+          taskId: job.auditor_task_id,
+          dispatchId: job.auditor_dispatch_id,
+          terminalHandle: job.auditor_terminal_handle,
+          auditRound: job.audit_round,
+          auditHeadSha: job.audit_head_sha,
+        };
+        waitLock.releaseLock();
+      };
+      const afterDispatchWait = (wait: DispatchWait): string | null => {
+        const reacquired = acquireLock(waitLock.lockPath);
+        if (!reacquired.ok) {
+          dispatchWaitError =
+            reacquired.error ?? "failed to reacquire lock after audit dispatch wait";
+          return dispatchWaitError;
+        }
+        const current = ledger.getJob(jobId);
+        const expected = dispatchWaitSnapshot;
+        if (
+          !current ||
+          !expected ||
+          current.revision !== expected.revision ||
+          current.state !== expected.state ||
+          current.auditor_task_id !== expected.taskId ||
+          current.auditor_dispatch_id !== expected.dispatchId ||
+          current.auditor_terminal_handle !== expected.terminalHandle ||
+          current.audit_round !== expected.auditRound ||
+          current.audit_head_sha !== expected.auditHeadSha
+        ) {
+          dispatchWaitError =
+            "job changed while waiting for audit dispatch; retry coordination cycle";
+          return dispatchWaitError;
+        }
+        job = current;
+        if (wait.kind === "terminal_idle") {
+          taskCreateGuardError = auditDispatchFixedPointError();
+          return taskCreateGuardError;
+        }
+        return null;
+      };
       const ensured = dispatchTaskEnsured(orcaCli, {
         title: `Audit ${repo.github}#${job.issue_number} r${round}`,
         displayName: `issue-${job.issue_number}-audit-r${round}`,
@@ -488,6 +603,12 @@ function runAuditPhase(
         idleTimeoutMs: 120_000,
         onLog: log,
         existingDispatch,
+        beforeWait: beforeDispatchWait,
+        afterWait: afterDispatchWait,
+        beforeTaskCreate: () => {
+          taskCreateGuardError = auditDispatchFixedPointError();
+          return taskCreateGuardError;
+        },
         onDispatched: (event) => {
           job = ledger.updateJob(jobId, {
             state: "auditing",
@@ -504,6 +625,9 @@ function runAuditPhase(
             forceNew: true,
           }),
       });
+      if (dispatchWaitError) {
+        return { ok: false, jobId, message: dispatchWaitError };
+      }
       if (!ensured.ok) {
         const hasLastTask = ensured.lastTaskId !== undefined;
         const taskId = ensured.lastTaskId ?? job.auditor_task_id;
@@ -511,11 +635,13 @@ function runAuditPhase(
           ? ensured.lastDispatchId ?? null
           : job.auditor_dispatch_id;
         const shouldBlock =
+          taskCreateGuardError !== null ||
           ensured.kind === "exhausted" ||
           (hasLastTask && dispatchId === null);
-        job = ledger.updateJob(job.id, {
+        if (!updateCurrentJob({
           state: shouldBlock ? "blocked" : job.state,
-          last_error: `dispatch ${ensured.kind}: ${ensured.error}`,
+          last_error:
+            taskCreateGuardError ?? `dispatch ${ensured.kind}: ${ensured.error}`,
           auditor_terminal_handle: ensured.to,
           auditor_task_id: taskId,
           auditor_dispatch_id: dispatchId,
@@ -524,11 +650,17 @@ function runAuditPhase(
             : job.dispatch_attempt,
           dispatch_probe_pending:
             shouldBlock || !taskId ? 0 : 1,
-        });
-        return { ok: false, jobId: job.id, message: ensured.error };
+        })) {
+          return jobChangedWhileWaiting();
+        }
+        return {
+          ok: false,
+          jobId: job.id,
+          message: taskCreateGuardError ?? ensured.error,
+        };
       }
 
-      job = ledger.updateJob(job.id, {
+      if (!updateCurrentJob({
         state: "auditing",
         auditor_task_id: ensured.taskId,
         auditor_dispatch_id: ensured.dispatchId,
@@ -536,7 +668,9 @@ function runAuditPhase(
         dispatch_attempt: ensured.attempt,
         dispatch_probe_pending: 0,
         last_error: null,
-      });
+      })) {
+        return jobChangedWhileWaiting();
+      }
       log(
         `dispatch ok attempt=${ensured.attempt} task=${ensured.taskId} (${ensured.acceptReason})`,
       );
@@ -544,13 +678,38 @@ function runAuditPhase(
       log(`audit task already accepted: ${job.auditor_task_id}`);
     }
 
+    const waitRevision = job.revision;
+    const waitTaskId = job.auditor_task_id!;
+    const waitDispatchId = job.auditor_dispatch_id;
+    waitLock.releaseLock();
     const done = waitWorkerDone(orcaCli, {
       controllerHandle: job.controller_terminal_handle!,
-      taskId: job.auditor_task_id!,
-      dispatchId: job.auditor_dispatch_id,
+      taskId: waitTaskId,
+      dispatchId: waitDispatchId,
       timeoutMs: config.auditTimeoutMinutes * 60_000,
       onTick: (info) => log(info),
     });
+    const reacquired = acquireLock(waitLock.lockPath);
+    if (!reacquired.ok) {
+      return {
+        ok: false,
+        jobId: job.id,
+        message: reacquired.error ?? "failed to reacquire lock after audit wait",
+      };
+    }
+    const current = ledger.getJob(job.id);
+    if (
+      !current ||
+      current.revision !== waitRevision ||
+      current.state !== "auditing" ||
+      current.auditor_task_id !== waitTaskId ||
+      current.auditor_dispatch_id !== waitDispatchId ||
+      current.audit_round !== round ||
+      current.audit_head_sha !== headSha
+    ) {
+      return jobChangedWhileWaiting();
+    }
+    job = current;
     if (!done.ok) {
       // worker_done may be lost; completed task provenance is the fallback.
       const late = loadAuditResult(resultPath);
@@ -568,10 +727,12 @@ function runAuditPhase(
           auditResultMatchesShas(late.result, baseSha, headSha)
         )
       ) {
-        job = ledger.updateJob(job.id, {
+        if (!updateCurrentJob({
           state: "blocked",
           last_error: done.error,
-        });
+        })) {
+          return jobChangedWhileWaiting();
+        }
         return { ok: false, jobId: job.id, message: done.error };
       }
       log(
@@ -584,23 +745,27 @@ function runAuditPhase(
     log(
       "M5 resume: reusing valid audit result from the completed same-round task",
     );
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "auditing",
       audit_round: round,
       audit_head_sha: headSha,
       head_sha: headSha,
       dispatch_attempt: 0,
       dispatch_probe_pending: 0,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
   }
 
   // Cleanliness: tracked files must not change
   const dirtyAfter = trackedDirty(worktreePath);
   if (dirtyAfter) {
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "blocked",
       last_error: `auditor modified tracked files:\n${dirtyAfter}`,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     return {
       ok: false,
       jobId: job.id,
@@ -612,10 +777,12 @@ function runAuditPhase(
   // HEAD must be unchanged during audit
   const headAfter = revParse(worktreePath, "HEAD");
   if (!headAfter || headAfter !== headSha) {
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "blocked",
       last_error: `HEAD changed during audit: ${headSha} → ${headAfter}`,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     return {
       ok: false,
       jobId: job.id,
@@ -634,9 +801,9 @@ function runAuditPhase(
   const resultJson = loaded.result
     ? JSON.stringify(loaded.result, null, 2)
     : JSON.stringify({ error: loaded.error });
-  job = ledger.updateJob(job.id, {
-    audit_result_json: resultJson,
-  });
+  if (!updateCurrentJob({ audit_result_json: resultJson })) {
+    return jobChangedWhileWaiting();
+  }
   // also archive round copy
   try {
     writeFileSync(
@@ -648,12 +815,14 @@ function runAuditPhase(
   }
 
   if (gate.pass) {
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "audit_passed",
       dispatch_attempt: 0,
       dispatch_probe_pending: 0,
       last_error: null,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     setWorktreeProgress(
       orcaCli,
       worktreeId,
@@ -674,12 +843,14 @@ function runAuditPhase(
   }
 
   // Keep the same round recoverable until the caller moves it to rework.
-  job = ledger.updateJob(job.id, {
+  if (!updateCurrentJob({
     state: "auditing",
     dispatch_attempt: 0,
     dispatch_probe_pending: 0,
     last_error: gate.reason,
-  });
+  })) {
+    return jobChangedWhileWaiting();
+  }
   setWorktreeProgress(
     orcaCli,
     worktreeId,
@@ -702,6 +873,7 @@ function runReworkPhase(
   repo: RepoConfig,
   implementer: ReturnType<typeof getImplementerProfile>,
   log: (m: string) => void,
+  waitLock: WaitLockOptions,
 ): AuditOnceResult {
   if (!job.worktree_id || !job.worktree_path || !job.base_sha) {
     return { ok: false, jobId: job.id, message: "missing worktree for rework" };
@@ -709,11 +881,25 @@ function runReworkPhase(
   const worktreeId = job.worktree_id;
   const worktreePath = job.worktree_path;
   const baseSha = job.base_sha;
+  const jobChangedWhileWaiting = (): AuditOnceResult => ({
+    ok: false,
+    jobId: job.id,
+    message: "job changed while waiting for rework; retry coordination cycle",
+  });
+  const updateCurrentJob = (
+    patch: Parameters<Ledger["updateJob"]>[1],
+  ): Job | null => {
+    const updated = ledger.updateJobIf(job.id, job.revision, patch);
+    if (updated) job = updated;
+    return updated;
+  };
   const blockRework = (error: string): AuditOnceResult => {
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "blocked",
       last_error: error,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     return { ok: false, jobId: job.id, message: error };
   };
   const blockFailedTask = (taskId: string): AuditOnceResult =>
@@ -792,7 +978,7 @@ function runReworkPhase(
   const finishRework = (
     completion: { headSha: string; commits: number },
   ): AuditOnceResult => {
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "awaiting_audit",
       head_sha: completion.headSha,
       last_error: null,
@@ -802,7 +988,9 @@ function runReworkPhase(
       auditor_terminal_handle: null,
       dispatch_attempt: 0,
       dispatch_probe_pending: 0,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     log(
       `rework done head=${completion.headSha.slice(0, 7)} ` +
       `commits_since_audit=${completion.commits}`,
@@ -918,6 +1106,59 @@ function runReworkPhase(
           }
         : undefined;
     let taskCreateGuardError: string | null = null;
+    let dispatchWaitError: string | null = null;
+    let dispatchWaitSnapshot: {
+      revision: number;
+      state: Job["state"];
+      taskId: string | null;
+      dispatchId: string | null;
+      terminalHandle: string | null;
+      auditRound: number;
+      auditHeadSha: string | null;
+    } | null = null;
+    const beforeDispatchWait = (_wait: DispatchWait) => {
+      dispatchWaitSnapshot = {
+        revision: job.revision,
+        state: job.state,
+        taskId: job.implementer_task_id,
+        dispatchId: job.implementer_dispatch_id,
+        terminalHandle: job.implementer_terminal_handle,
+        auditRound: job.audit_round,
+        auditHeadSha: job.audit_head_sha,
+      };
+      waitLock.releaseLock();
+    };
+    const afterDispatchWait = (wait: DispatchWait): string | null => {
+      const reacquired = acquireLock(waitLock.lockPath);
+      if (!reacquired.ok) {
+        dispatchWaitError =
+          reacquired.error ?? "failed to reacquire lock after rework dispatch wait";
+        return dispatchWaitError;
+      }
+      const current = ledger.getJob(jobId);
+      const expected = dispatchWaitSnapshot;
+      if (
+        !current ||
+        !expected ||
+        current.revision !== expected.revision ||
+        current.state !== expected.state ||
+        current.implementer_task_id !== expected.taskId ||
+        current.implementer_dispatch_id !== expected.dispatchId ||
+        current.implementer_terminal_handle !== expected.terminalHandle ||
+        current.audit_round !== expected.auditRound ||
+        current.audit_head_sha !== expected.auditHeadSha
+      ) {
+        dispatchWaitError =
+          "job changed while waiting for rework dispatch; retry coordination cycle";
+        return dispatchWaitError;
+      }
+      job = current;
+      if (wait.kind === "terminal_idle") {
+        taskCreateGuardError = dispatchFixedPointError();
+        return taskCreateGuardError;
+      }
+      return null;
+    };
     const ensured = dispatchTaskEnsured(orcaCli, {
       title: `Rework ${repo.github}#${job.issue_number} after audit r${job.audit_round}`,
       displayName: `issue-${job.issue_number}-rework-r${job.audit_round}`,
@@ -926,6 +1167,8 @@ function runReworkPhase(
       from: job.controller_terminal_handle!,
       onLog: log,
       existingDispatch,
+      beforeWait: beforeDispatchWait,
+      afterWait: afterDispatchWait,
       beforeTaskCreate: () => {
         taskCreateGuardError = dispatchFixedPointError();
         return taskCreateGuardError;
@@ -957,6 +1200,9 @@ function runReworkPhase(
         return replacement;
       },
     });
+    if (dispatchWaitError) {
+      return { ok: false, jobId, message: dispatchWaitError };
+    }
     if (!ensured.ok) {
       const hasLastTask = ensured.lastTaskId !== undefined;
       const taskId = ensured.lastTaskId ?? job.implementer_task_id;
@@ -967,7 +1213,7 @@ function runReworkPhase(
         taskCreateGuardError !== null ||
         ensured.kind === "exhausted" ||
         (hasLastTask && dispatchId === null);
-      job = ledger.updateJob(job.id, {
+      if (!updateCurrentJob({
         state: shouldBlock ? "blocked" : "reworking",
         last_error:
           taskCreateGuardError ??
@@ -980,7 +1226,9 @@ function runReworkPhase(
           : job.dispatch_attempt,
         dispatch_probe_pending:
           shouldBlock || !taskId ? 0 : 1,
-      });
+      })) {
+        return jobChangedWhileWaiting();
+      }
       return {
         ok: false,
         jobId: job.id,
@@ -988,7 +1236,7 @@ function runReworkPhase(
       };
     }
 
-    job = ledger.updateJob(job.id, {
+    if (!updateCurrentJob({
       state: "reworking",
       implementer_terminal_handle: ensured.to,
       implementer_task_id: ensured.taskId,
@@ -996,7 +1244,9 @@ function runReworkPhase(
       dispatch_attempt: ensured.attempt,
       dispatch_probe_pending: 0,
       last_error: null,
-    });
+    })) {
+      return jobChangedWhileWaiting();
+    }
     if (ensured.taskId === failedPendingTaskId) {
       return blockFailedTask(ensured.taskId);
     }
@@ -1013,13 +1263,36 @@ function runReworkPhase(
     `harness: reworking after audit r${job.audit_round}`,
     "in-progress",
   );
+  const waitRevision = job.revision;
+  const waitTaskId = job.implementer_task_id!;
+  const waitDispatchId = job.implementer_dispatch_id;
+  waitLock.releaseLock();
   const done = waitWorkerDone(orcaCli, {
     controllerHandle: job.controller_terminal_handle!,
-    taskId: job.implementer_task_id!,
-    dispatchId: job.implementer_dispatch_id,
+    taskId: waitTaskId,
+    dispatchId: waitDispatchId,
     timeoutMs: config.implementTimeoutMinutes * 60_000,
     onTick: (info) => log(info),
   });
+  const reacquired = acquireLock(waitLock.lockPath);
+  if (!reacquired.ok) {
+    return {
+      ok: false,
+      jobId: job.id,
+      message: reacquired.error ?? "failed to reacquire lock after rework wait",
+    };
+  }
+  const current = ledger.getJob(job.id);
+  if (
+    !current ||
+    current.revision !== waitRevision ||
+    current.state !== "reworking" ||
+    current.implementer_task_id !== waitTaskId ||
+    current.implementer_dispatch_id !== waitDispatchId
+  ) {
+    return jobChangedWhileWaiting();
+  }
+  job = current;
   if (!done.ok) {
     if (done.escalated) {
       return blockRework(done.error);

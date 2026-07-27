@@ -582,6 +582,16 @@ export function failOrchestrationTask(
     : { ok: false, error: result.error ?? "task-update failed" };
 }
 
+export type DispatchWait =
+  | { kind: "terminal_idle"; to: string }
+  | {
+      kind: "dispatch_acceptance";
+      to: string;
+      taskId: string;
+      dispatchId: string | null;
+      attempt: 1 | 2;
+    };
+
 /**
  * Create task + dispatch + confirm agent started.
  * On silent-idle failure: fail task, optionally new terminal, one automatic re-dispatch.
@@ -613,6 +623,9 @@ export function dispatchTaskEnsured(
       to: string;
       attempt: 1 | 2;
     };
+    /** Called around terminal/acceptance waits so callers can release and reacquire locks. */
+    beforeWait?: (wait: DispatchWait) => void;
+    afterWait?: (wait: DispatchWait) => string | null;
     /** Final caller-owned guard immediately before each task creation. */
     beforeTaskCreate?: (attempt: 1 | 2) => string | null;
     /** Called before second attempt; return replacement agent handle or null. */
@@ -639,12 +652,43 @@ export function dispatchTaskEnsured(
   const log = input.onLog ?? (() => {});
   const probeTimeoutMs = input.probeTimeoutMs ?? 45_000;
 
+  function waitWithHooks<T>(
+    wait: DispatchWait,
+    operation: () => T,
+  ): { ok: true; value: T } | { ok: false; error: string } {
+    input.beforeWait?.(wait);
+    let value: T | undefined;
+    let failure: unknown;
+    try {
+      value = operation();
+    } catch (err) {
+      failure = err;
+    }
+    const validationError = input.afterWait?.(wait) ?? null;
+    if (failure) throw failure;
+    if (validationError) return { ok: false, error: validationError };
+    return { ok: true, value: value as T };
+  }
+
   if (!input.existingDispatch) {
-    const ready = waitTerminalIdle(
-      orcaCli,
-      input.to,
-      input.idleTimeoutMs ?? 90_000,
+    const waited = waitWithHooks(
+      { kind: "terminal_idle", to: input.to },
+      () =>
+        waitTerminalIdle(
+          orcaCli,
+          input.to,
+          input.idleTimeoutMs ?? 90_000,
+        ),
     );
+    if (!waited.ok) {
+      return {
+        ok: false,
+        error: waited.error,
+        to: input.to,
+        kind: "unknown",
+      };
+    }
+    const ready = waited.value;
     if (!ready.ok || ready.satisfied !== true) {
       return {
         ok: false,
@@ -674,11 +718,32 @@ export function dispatchTaskEnsured(
         acceptReason: string;
       }
     | DispatchAttemptFailure => {
-    const accepted = awaitDispatchAccepted(orcaCli, to, taskId, {
-      timeoutMs: probeTimeoutMs,
-      cursor,
-      onTick: (info) => log(info),
-    });
+    const waited = waitWithHooks(
+      {
+        kind: "dispatch_acceptance",
+        to,
+        taskId,
+        dispatchId,
+        attempt,
+      },
+      () =>
+        awaitDispatchAccepted(orcaCli, to, taskId, {
+          timeoutMs: probeTimeoutMs,
+          cursor,
+          onTick: (info) => log(info),
+        }),
+    );
+    if (!waited.ok) {
+      return {
+        ok: false,
+        error: waited.error,
+        kind: "unknown",
+        taskId,
+        dispatchId,
+        attempt,
+      };
+    }
+    const accepted = waited.value;
 
     if (accepted.accepted) {
       log(`dispatch accepted (attempt ${attempt}): ${accepted.reason}`);
@@ -862,11 +927,25 @@ export function dispatchTaskEnsured(
     };
   }
   log(`recreated agent terminal: ${to}`);
-  const idle = waitTerminalIdle(
-    orcaCli,
-    to,
-    input.idleTimeoutMs ?? 90_000,
+  const waited = waitWithHooks(
+    { kind: "terminal_idle", to },
+    () =>
+      waitTerminalIdle(
+        orcaCli,
+        to,
+        input.idleTimeoutMs ?? 90_000,
+      ),
   );
+  if (!waited.ok) {
+    return {
+      ok: false,
+      error: waited.error,
+      to,
+      ...lastDispatchProvenance(first),
+      kind: "unknown",
+    };
+  }
+  const idle = waited.value;
   if (!idle.ok || idle.satisfied !== true) {
     return {
       ok: false,

@@ -2,16 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Ledger } from "../src/ledger.js";
+import { acquireLock } from "../src/lock.js";
 import { runOnce } from "../src/run-once.js";
 
 type FixtureMode =
@@ -22,6 +25,9 @@ type FixtureMode =
   | "pending-failed-race"
   | "accepted"
   | "working"
+  | "lock-wait"
+  | "dispatch-lock-wait"
+  | "idle-lock-wait"
   | "failed"
   | "late-failed"
   | "diverged"
@@ -41,6 +47,13 @@ function createFixture(mode: FixtureMode): {
   git(worktree, "init", "-b", "agent/issue-12");
   git(worktree, "config", "user.name", "Harness Test");
   git(worktree, "config", "user.email", "harness@example.test");
+  git(
+    worktree,
+    "remote",
+    "add",
+    "origin",
+    "https://github.com/owner/repo.git",
+  );
   writeFileSync(join(worktree, "value.txt"), "base\n");
   git(worktree, "add", "value.txt");
   git(worktree, "commit", "-m", "base");
@@ -49,6 +62,7 @@ function createFixture(mode: FixtureMode): {
     mode === "pending" ||
     mode === "accepted" ||
     mode === "working" ||
+    mode === "lock-wait" ||
     mode === "failed" ||
     mode === "diverged" ||
     mode === "dirty"
@@ -88,6 +102,13 @@ const dispatched = existsSync(${JSON.stringify(statePath)});
 const ok = (result) => console.log(JSON.stringify({ ok: true, result }));
 if (args[0] === "status") {
   ok({ app: { running: true }, runtime: { state: "ready", reachable: true } });
+} else if (key === "repo show") {
+  ok({ repo: {
+    id: "repo-1",
+    path: ${JSON.stringify(worktree)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  } });
 } else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${dir}`)})) {
   ok({ terminals: [{ handle: "controller-1", title: "test-controller", connected: true }] });
 } else if (key === "terminal list") {
@@ -104,13 +125,27 @@ if (args[0] === "status") {
   }
 } else if (key === "terminal wait") {
   const handle = args[args.indexOf("--terminal") + 1];
-  if (handle === "implementer-stale") {
+  if (mode === "idle-lock-wait") {
+    writeFileSync(${JSON.stringify(join(dir, "idle-waiting"))}, "waiting");
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(${JSON.stringify(join(dir, "release-idle"))})) {
+      Atomics.wait(wait, 0, 0, 10);
+    }
+    ok({ wait: { satisfied: true, blockedReason: null } });
+  } else if (handle === "implementer-stale") {
     console.log(JSON.stringify({ ok: false, error: { message: "terminal implementer-stale not found" } }));
     process.exitCode = 1;
   } else {
     ok({ wait: { satisfied: true, blockedReason: null } });
   }
 } else if (key === "terminal read") {
+  if (mode === "dispatch-lock-wait" && dispatched) {
+    writeFileSync(${JSON.stringify(join(dir, "dispatch-waiting"))}, "waiting");
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(${JSON.stringify(join(dir, "release-dispatch"))})) {
+      Atomics.wait(wait, 0, 0, 10);
+    }
+  }
   ok({ terminal: {
     nextCursor: dispatched ? "2" : "1",
     tail:
@@ -123,14 +158,14 @@ if (args[0] === "status") {
   ok({ terminal: { handle: "implementer-new", title: "issue-12-codex" } });
 } else if (key === "orchestration task-list") {
   ok({ tasks: [{
-    id: mode === "new" || mode === "ambiguous" ? "task-new" : "task-existing",
+    id: mode === "new" || mode === "ambiguous" || mode === "dispatch-lock-wait" || mode === "idle-lock-wait" ? "task-new" : "task-existing",
     status:
       mode === "failed" ||
       mode === "pending-failed" ||
       mode === "pending-failed-race" ||
       mode === "late-failed"
       ? "failed"
-      : mode === "working" || mode === "new" || mode === "ambiguous"
+      : mode === "working" || mode === "lock-wait" || mode === "new" || mode === "ambiguous"
         ? "working"
         : "completed"
   }] });
@@ -138,6 +173,8 @@ if (args[0] === "status") {
   if (
     mode !== "new" &&
     mode !== "ambiguous" &&
+    mode !== "dispatch-lock-wait" &&
+    mode !== "idle-lock-wait" &&
     mode !== "pending-failed-race"
   ) {
     console.log(JSON.stringify({ ok: false, error: { message: "unexpected task creation" } }));
@@ -151,6 +188,7 @@ if (args[0] === "status") {
     (
       mode !== "new" &&
       mode !== "ambiguous" &&
+      mode !== "dispatch-lock-wait" &&
       mode !== "pending-failed-race"
     ) ||
     to !== "implementer-new"
@@ -175,7 +213,18 @@ if (args[0] === "status") {
     process.exitCode = 1;
   }
 } else if (key === "orchestration check") {
-  if (mode === "late-failed") {
+  if (mode === "lock-wait") {
+    writeFileSync(${JSON.stringify(join(dir, "worker-waiting"))}, "waiting");
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    while (!existsSync(${JSON.stringify(join(dir, "release-worker"))})) {
+      Atomics.wait(wait, 0, 0, 10);
+    }
+    ok({ messages: [{
+      type: "worker_done",
+      taskId: "task-existing",
+      dispatchId: "dispatch-existing"
+    }] });
+  } else if (mode === "late-failed") {
     writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "late failed fix\\n");
     execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "add", "value.txt"]);
     execFileSync("git", ["-C", ${JSON.stringify(worktree)}, "commit", "-m", "late failed fix"]);
@@ -249,7 +298,13 @@ repositories:
   const ledger = new Ledger(ledgerPath);
   const claim = ledger.tryClaim({
     id: "job-terminal",
-    repo: "owner/repo",
+    project: {
+      github: "owner/repo",
+      localPath: worktree,
+      orcaRepoId: "repo-1",
+      baseRef: "origin/main",
+      defaultBranch: "main",
+    },
     issue: {
       number: 12,
       title: "Recover stale terminal",
@@ -259,6 +314,7 @@ repositories:
       blockedBy: [],
     },
     baseRef: "origin/main",
+    baseSha,
     implementerProfileId: "codex-default",
   });
   assert.equal(claim.ok, true);
@@ -268,6 +324,7 @@ repositories:
     mode === "pending-failed-race" ||
     mode === "accepted" ||
     mode === "working" ||
+    mode === "lock-wait" ||
     mode === "failed" ||
     mode === "late-failed" ||
     mode === "diverged" ||
@@ -494,6 +551,202 @@ test("runOnce does not rebind or redispatch an accepted task", (t) => {
   );
 });
 
+test("runOnce revalidates the fixed point after an unlocked idle wait", async (t) => {
+  const fixture = createFixture("idle-lock-wait");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const lockPath = join(fixture.dir, "harness.lock");
+  const markerPath = join(fixture.dir, "idle-waiting");
+  const releasePath = join(fixture.dir, "release-idle");
+  const resultPath = join(fixture.dir, "run-result.json");
+  const runnerPath = join(fixture.dir, "runner.mjs");
+  const runOnceModuleUrl = pathToFileURL(
+    join(process.cwd(), "src", "run-once.ts"),
+  ).href;
+  writeFileSync(
+    runnerPath,
+    `import { writeFileSync } from "node:fs";
+import { runOnce } from ${JSON.stringify(runOnceModuleUrl)};
+const result = runOnce({
+  configPath: ${JSON.stringify(fixture.configPath)},
+  ledgerPath: ${JSON.stringify(fixture.ledgerPath)},
+  lockPath: ${JSON.stringify(lockPath)},
+});
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, ["--import", "tsx", runnerPath], {
+    cwd: process.cwd(),
+  });
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exitPromise = new Promise<number | null>((resolve) =>
+    child.once("exit", resolve),
+  );
+
+  await waitForFile(markerPath);
+  const competingLock = acquireLock(lockPath);
+  if (competingLock.ok) {
+    const worktree = join(fixture.dir, "worktree");
+    writeFileSync(join(worktree, "value.txt"), "concurrent change\n");
+    git(worktree, "add", "value.txt");
+    git(worktree, "commit", "-m", "concurrent change");
+    competingLock.release();
+  }
+  writeFileSync(releasePath, "continue");
+  const exitCode = await exitPromise;
+
+  assert.equal(
+    competingLock.ok,
+    true,
+    competingLock.error ?? "lock unavailable during terminal idle wait",
+  );
+  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+    ok: boolean;
+    message: string;
+  };
+  assert.equal(result.ok, false);
+  assert.match(result.message, /HEAD changed before implementation dispatch/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "blocked");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
+test("runOnce releases dispatch wait lock and preserves newer job facts", async (t) => {
+  const fixture = createFixture("dispatch-lock-wait");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const lockPath = join(fixture.dir, "harness.lock");
+  const markerPath = join(fixture.dir, "dispatch-waiting");
+  const releasePath = join(fixture.dir, "release-dispatch");
+  const resultPath = join(fixture.dir, "run-result.json");
+  const runnerPath = join(fixture.dir, "runner.mjs");
+  const runOnceModuleUrl = pathToFileURL(
+    join(process.cwd(), "src", "run-once.ts"),
+  ).href;
+  writeFileSync(
+    runnerPath,
+    `import { writeFileSync } from "node:fs";
+import { runOnce } from ${JSON.stringify(runOnceModuleUrl)};
+const result = runOnce({
+  configPath: ${JSON.stringify(fixture.configPath)},
+  ledgerPath: ${JSON.stringify(fixture.ledgerPath)},
+  lockPath: ${JSON.stringify(lockPath)},
+});
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, ["--import", "tsx", runnerPath], {
+    cwd: process.cwd(),
+  });
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exitPromise = new Promise<number | null>((resolve) =>
+    child.once("exit", resolve),
+  );
+
+  await waitForFile(markerPath);
+  const competingLock = acquireLock(lockPath);
+  if (competingLock.ok) {
+    const concurrent = new Ledger(fixture.ledgerPath);
+    concurrent.updateJob("job-terminal", {
+      last_error: "newer coordinator fact",
+    });
+    concurrent.close();
+    competingLock.release();
+  }
+  writeFileSync(releasePath, "continue");
+  const exitCode = await exitPromise;
+
+  assert.equal(
+    competingLock.ok,
+    true,
+    competingLock.error ?? "lock unavailable during dispatch acceptance wait",
+  );
+  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+    ok: boolean;
+    message: string;
+  };
+  assert.equal(result.ok, false);
+  assert.match(result.message, /job changed while waiting for implementation dispatch/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "implementing");
+  assert.equal(
+    verified.getJob("job-terminal")?.last_error,
+    "newer coordinator fact",
+  );
+  verified.close();
+});
+
+test("runOnce releases the PID lock while waiting for worker_done", async (t) => {
+  const fixture = createFixture("lock-wait");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const lockPath = join(fixture.dir, "harness.lock");
+  const markerPath = join(fixture.dir, "worker-waiting");
+  const releasePath = join(fixture.dir, "release-worker");
+  const resultPath = join(fixture.dir, "run-result.json");
+  const runnerPath = join(fixture.dir, "runner.mjs");
+  const runOnceModuleUrl = pathToFileURL(
+    join(process.cwd(), "src", "run-once.ts"),
+  ).href;
+  writeFileSync(
+    runnerPath,
+    `import { writeFileSync } from "node:fs";
+import { runOnce } from ${JSON.stringify(runOnceModuleUrl)};
+const result = runOnce({
+  configPath: ${JSON.stringify(fixture.configPath)},
+  ledgerPath: ${JSON.stringify(fixture.ledgerPath)},
+  lockPath: ${JSON.stringify(lockPath)},
+});
+writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result));
+`,
+  );
+
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, ["--import", "tsx", runnerPath], {
+    cwd: process.cwd(),
+  });
+  child.stdout.on("data", (chunk) => (stdout += String(chunk)));
+  child.stderr.on("data", (chunk) => (stderr += String(chunk)));
+  const exitPromise = new Promise<number | null>((resolve) =>
+    child.once("exit", resolve),
+  );
+
+  await waitForFile(markerPath);
+  const competingLock = acquireLock(lockPath);
+  if (competingLock.ok) competingLock.release();
+  writeFileSync(releasePath, "continue");
+  const exitCode = await exitPromise;
+
+  assert.equal(
+    competingLock.ok,
+    true,
+    competingLock.error ?? "lock unavailable during worker wait",
+  );
+  assert.equal(exitCode, 0, `${stdout}\n${stderr}`);
+  const result = JSON.parse(readFileSync(resultPath, "utf8")) as {
+    ok: boolean;
+    message: string;
+  };
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-terminal")?.state, "awaiting_audit");
+  verified.close();
+});
+
 test("runOnce does not finalize commits while the task is still working", (t) => {
   const fixture = createFixture("working");
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
@@ -602,6 +855,14 @@ test("runOnce blocks a completed task whose HEAD diverged from base", (t) => {
   assert.equal(verified.getJob("job-terminal")?.state, "blocked");
   verified.close();
 });
+
+async function waitForFile(path: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 function readCalls(path: string): string[][] {
   return readFileSync(path, "utf8")

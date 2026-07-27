@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Ledger } from "../src/ledger.js";
+import { testProject } from "./support.js";
 import type { IssueCandidate } from "../src/types.js";
 
 function issue(n: number): IssueCandidate {
@@ -24,9 +25,10 @@ test("single-slot: second claim fails while active job exists", () => {
   try {
     const a = ledger.tryClaim({
       id: "job-a",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(a.ok, true);
@@ -37,9 +39,10 @@ test("single-slot: second claim fails while active job exists", () => {
 
     const b = ledger.tryClaim({
       id: "job-b",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(2),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(b.ok, false);
@@ -57,18 +60,20 @@ test("same issue cannot be double-claimed while active", () => {
   try {
     const a = ledger.tryClaim({
       id: "job-a",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(a.ok, true);
 
     const again = ledger.tryClaim({
       id: "job-a2",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(again.ok, false);
@@ -85,9 +90,10 @@ test("after merged, same issue can be re-claimed (new attempt)", () => {
   try {
     const a = ledger.tryClaim({
       id: "job-a",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(a.ok, true);
@@ -104,14 +110,17 @@ test("after merged, same issue can be re-claimed (new attempt)", () => {
 
     const b = ledger.tryClaim({
       id: "job-b",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(b.ok, true);
     if (b.ok) {
       assert.equal(b.job.state, "claimed");
+      assert.equal(b.job.revision, 0);
+      assert.equal(b.job.base_sha, "base");
       assert.equal(b.job.auditor_profile_id, null);
       assert.equal(b.job.auditor_terminal_handle, null);
       assert.equal(b.job.auditor_task_id, null);
@@ -133,9 +142,10 @@ test("hasActiveJob false after merged", () => {
   try {
     ledger.tryClaim({
       id: "job-a",
-      repo: "o/r",
+      project: testProject("o/r"),
       issue: issue(1),
       baseRef: "origin/main",
+      baseSha: "base",
       implementerProfileId: "codex-default",
     });
     assert.equal(ledger.hasActiveJob(), true);

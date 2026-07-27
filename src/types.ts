@@ -1,9 +1,32 @@
-export type RepoConfig = {
+export type ProjectKey = string;
+
+export type ProjectIdentity = {
+  key: ProjectKey;
+  github: string;
+  defaultBranch: string;
+};
+
+export type ProjectRuntimeBinding = {
+  localPath: string;
+  baseRef: string;
+  orcaRepoId: string;
+};
+
+export type EnrolledProject = ProjectIdentity &
+  Omit<ProjectRuntimeBinding, "orcaRepoId"> & {
+    orcaRepoId: string | null;
+  };
+
+export type RepoConfig = Omit<ProjectIdentity, "key"> & ProjectRuntimeBinding;
+
+export type ProjectSnapshot = {
+  version: 1;
+  key: ProjectKey;
   github: string;
   localPath: string;
-  orcaRepoId: string;
   baseRef: string;
   defaultBranch: string;
+  orcaRepoId: string;
 };
 
 export type MergePolicy = {
@@ -149,6 +172,9 @@ export type Job = {
   issue_url: string;
   issue_updated_at: string;
   issue_snapshot_json: string;
+  project_key: ProjectKey | null;
+  project_revision: string | null;
+  project_snapshot_json: string | null;
   state: JobState;
   base_ref: string;
   base_sha: string | null;
@@ -176,6 +202,7 @@ export type Job = {
   merged_at: string | null;
   last_error: string | null;
   head_sha: string | null;
+  revision: number;
   created_at: string;
   updated_at: string;
 };
