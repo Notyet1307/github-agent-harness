@@ -2,488 +2,154 @@
 
 [简体中文](README.zh-CN.md)
 
-A single-task coding-agent controller with a merge gate.
+Run one GitHub issue at a time from implementation to a merged pull request.
 
-```text
-Picker → Ledger Claim → Orca Worktree → Pi /skill:implement
-  → Pi dual-axis audit → Gate → PR → GitHub or human merge → Next
-```
+~~~text
+eligible issue → claim → Orca worktree → implement → independent audit
+→ pull request → GitHub or human merge → next eligible issue
+~~~
 
-## Overview
+## What it does
 
-The harness selects work from GitHub issues, uses a SQLite ledger to allow only
-one in-flight job globally, and asks Orca to create an isolated worktree and
-dispatch the Pi implementer and Pi auditor. The controller pushes a branch and
-opens a PR only after an independent audit passes. By default, a human merges
-after all applicable branch-protection requirements are satisfied. Opt-in auto
-mode asks GitHub to auto-merge only the audited PR head; GitHub branch rules
-remain the CI/review authority.
+github-agent-harness is a local controller for coding agents. It selects an
+eligible GitHub issue, creates an isolated Orca worktree, dispatches an
+implementer and an independent auditor, then opens a pull request only after
+the audit passes.
 
-| Milestone | Command | Status |
-|---|---|---|
-| M0 | `pnpm harness doctor` | Implemented: configuration and runtime checks |
-| New machine onboarding | `pnpm harness setup` | Implemented: idempotent Git, GitHub, config, and Orca enrollment |
-| M1 | `pnpm harness pick --dry-run` | Implemented: read-only picker preview |
-| M2 | `pnpm harness run-once` | Implemented: stops after implementation commits |
-| M3 | `pnpm harness audit-once` | Implemented: Pi two-axis audit and rework gate, no PR |
-| M4 | `pnpm harness publish-once` / `wait-merge` | Implemented: create PR and wait, or request GitHub auto-merge |
-| M5 | `pnpm harness recover` | Implemented: reconcile and resume one ensure step |
-| M6 | `pnpm harness watch` | Implemented: foreground polling controller |
-| Deployment | macOS `launchd` | Deferred: this repository has no plist or service commands |
+A SQLite ledger keeps one job in flight. The controller never direct-merges a
+pull request or silently skips a failed job. By default it waits for a human
+merge. Optional auto mode asks GitHub to merge the audited PR head, while
+GitHub remains responsible for CI and review rules.
 
-## New machine onboarding
+The controller runs in the foreground. It does not install a background service
+or delete completed worktrees.
 
-The onboarding boundary is deliberate: GitHub identity and policy are tracked,
-while paths, Orca ids, the SQLite ledger, extensions, and credentials remain
-machine-local. A new computer must recreate those local bindings; it should not
-copy another computer's ledger or edit absolute paths into YAML.
+## Configure
 
-### What `setup` automates
+### 1. Install the local prerequisites
 
-`pnpm harness setup --repo OWNER/REPO --path /absolute/path/to/repo` is the
-primary onboarding command. It:
+- Node.js 22.19 or newer
+- pnpm 10.26.1
+- Git and GitHub CLI, authenticated for the target repository
+- Orca running locally
+- Pi initialized once with the provider and model for this machine
 
-1. Validates that the path is an absolute, readable Git worktree.
-2. Verifies that every `origin` fetch/push URL identifies `OWNER/REPO`.
-3. Discovers or validates the GitHub default branch and `origin/...` base ref.
-4. Registers or reuses both the Harness repo and target repo in Orca.
-5. Sets the target Orca repo's worktree base ref.
-6. Writes only the portable repository entry to `config/harness.yaml` when
-   needed, preserving unrelated YAML and file permissions.
-7. Runs `doctor` after a successful real setup.
-
-Setup does **not** clone repositories, install or authenticate external tools,
-create GitHub labels, copy provider credentials, provision Orca-managed Pi
-extensions, claim an issue, create a worktree, or merge a PR. A real setup is
-refused while the local ledger has an active job.
-
-### 1. Prepare machine-local prerequisites
-
-| Dependency | Requirement | Check |
-|---|---|---|
-| Node.js | 22.19 or newer | `node --version` |
-| pnpm | Exactly 10.26.1, as declared by `packageManager` | `pnpm --version` |
-| Git | Able to clone, fetch, and push the target repo | `git --version` |
-| GitHub CLI | Authenticated with issue, branch, and PR access | `gh auth status` |
-| Orca | App running and CLI runtime ready | `orca status` |
-| Pi user scope | Provider/model configured; Orca Pi extensions generated | Initialize after dependency install; verify with `doctor` |
-
-`pnpm install` provides the pinned Pi CLI and `pi-subagents`; no global Pi
-installation is required. Harness-owned skills, prompts, launchers, and auditor
-definitions live in this repository. Provider credentials and Orca-generated
-Pi extensions stay in the user's Pi directory and are never committed.
-
-### 2. Clone the Harness and target repository
-
-Replace `OWNER/REPO` and `/absolute/path/to/repo` with real values:
-
-```bash
+~~~bash
 git clone https://github.com/Notyet1307/github-agent-harness.git \
   "$HOME/github-agent-harness"
-
-git clone https://github.com/OWNER/REPO.git \
-  /absolute/path/to/repo
-```
-
-Setup never clones. The target path must already be a Git worktree whose
-`origin` fetch and push URLs both identify `OWNER/REPO`. Use the Git root's
-absolute path; running `pwd` inside the target repo is the simplest way to get
-it.
-
-### 3. Install project dependencies
-
-```bash
 cd "$HOME/github-agent-harness"
-
-# Only when pnpm is not already installed at the pinned version.
-npm install --global pnpm@10.26.1
-
-pnpm --version  # must print 10.26.1
 pnpm install --frozen-lockfile
-```
 
-No build step is required for the documented `pnpm harness ...` commands; they
-run the TypeScript entrypoint through `tsx`.
-
-### 4. Initialize Pi and Orca once
-
-Start Orca, then initialize the project-local Pi CLI with the provider/model
-that this machine will use:
-
-```bash
-orca open --json
-orca status --json
-
-cd "$HOME/github-agent-harness"
+# Start Orca first, then initialize Pi once in its interactive TUI.
 pnpm exec pi
-```
+~~~
 
-Complete Pi's provider/model setup in the TUI, confirm it reaches an idle prompt,
-then exit. Credentials remain under the Pi user directory or provider-specific
-environment variables; never put them in this repository.
+Clone the target repository separately. Harness never clones it for you.
 
-The current Harness also requires three files owned by Orca's Pi integration:
-`~/.pi/agent/extensions/orca-prefill.ts`, `orca-agent-status.ts`, and
-`orca-titlebar-spinner.ts` (or the equivalent directory selected by
-`PI_CODING_AGENT_DIR`). Harness deliberately has no fallback copies or installer
-for them. Launch Pi from Orca once so Orca can initialize its integration. If
-doctor still reports any of them missing, stop and repair or update Orca; do not
-copy extension files from another computer.
+### 2. Register the target repository
 
-### 5. Preview, then apply onboarding
+Use an absolute Git-root path. Preview first; the real command registers or
+reuses Orca bindings and records the portable repository entry in
+**config/harness.yaml**.
 
-```bash
-# Read-only plan. This still queries GitHub and Orca.
+~~~bash
 pnpm harness setup \
   --repo OWNER/REPO \
   --path /absolute/path/to/repo \
   --dry-run
 
-# Apply local Orca bindings and any required portable config entry.
 pnpm harness setup \
   --repo OWNER/REPO \
   --path /absolute/path/to/repo
-```
 
-The dry run prints `PLAN` plus `WOULD` actions and does not write config or
-mutate Orca. The real command is idempotent: correct registrations and base refs
-are reused. If the repository is new to the tracked config, review and commit
-the resulting `config/harness.yaml` change intentionally.
-
-Optional overrides are available when GitHub's default branch should not be
-used:
-
-```bash
-pnpm harness setup \
-  --repo OWNER/REPO \
-  --path /absolute/path/to/repo \
-  --default-branch main \
-  --base-ref origin/main
-```
-
-`baseRef` must use `origin`. An explicit branch is checked against GitHub before
-anything is changed.
-
-### 6. Verify before claiming work
-
-```bash
 pnpm harness doctor
 pnpm harness pick --dry-run
-pnpm harness status
-```
+~~~
 
-Do not start real work until doctor ends with `Result: PASS (no failures)` and
-the picker shows the intended issue. `WARN` checks, such as missing optional
-validation scripts in a target repo, do not make doctor fail. `pick --dry-run`
-does not write the ledger, create a worktree, or mutate labels.
+Do not start work until doctor ends with **Result: PASS (no failures)** and the
+picker shows the issue you expect.
 
-When the preview is correct, the attended entrypoint is:
+### 3. Choose the merge policy
 
-```bash
-pnpm harness work --dry-run --once
-pnpm harness work --once
-```
+The default is human merge:
 
-Contributors changing the Harness itself should also run `pnpm test`; it is a
-repository regression suite, not a prerequisite for every operator cycle.
+~~~yaml
+issueLabel: ready-for-agent
+pollIntervalSeconds: 120
 
-### Where state lives
+mergePolicy:
+  mode: wait
+  autoMerge: false
+~~~
 
-| State | Location | Portable? |
-|---|---|---|
-| GitHub repo slug, default branch, base ref, profiles, policy | `config/harness.yaml` | Yes; tracked |
-| Target path and Orca repo id | Orca repo inventory, resolved by GitHub identity | No; recreate with `setup` |
-| Jobs and the global single-job slot | `data/harness.sqlite` | No; local and ignored |
-| Pi provider/model credentials and Orca-generated extensions | Pi user directory | No; machine-local |
-| Harness Pi skills, agents, launchers, and pinned packages | This repository and `node_modules` | Recreated by clone + `pnpm install` |
+To use GitHub auto-merge, first enable **Allow auto-merge** in the target
+repository and configure required status checks for its target branch. Harness
+expects GitHub's **Require status checks** rule, not only a workflow rule.
 
-Never copy `data/harness.sqlite` between computers. Never run controllers on
-two computers against the same configured work simultaneously; the ledger and
-single-job lock coordinate only one local checkout.
+Then change both fields together:
 
-### Routine updates and repairs
-
-Updating the Harness on the same computer normally needs no re-enrollment:
-
-```bash
-cd "$HOME/github-agent-harness"
-git pull --ff-only
-pnpm install --frozen-lockfile
-pnpm harness doctor
-```
-
-Rerun the top-level `setup --repo ... --path ...` after moving a target checkout,
-reinstalling Orca, or losing an Orca binding. Setup fails closed if Orca already
-registers the same GitHub identity at a different path. The current public Orca
-CLI has no `repo remove` command: the safest immediate option is to reuse the
-registered path. To move intentionally, remove the stale repo in the Orca
-desktop UI, confirm it no longer appears in `orca repo list --json`, then rerun
-setup. Never edit Orca's internal state directly.
-
-`project add` and `project setup` are lower-level enrollment/repair commands.
-`project setup --repo ...` or `--all` repairs projects that are already
-resolvable from the current Orca inventory; it is not the fresh-machine entry
-point when a target path has not been registered. None of these commands create
-labels, claim issues, pin a task base SHA, or merge PRs.
-
-### Common onboarding failures
-
-- `project path must be absolute`: pass the Git root's absolute path.
-- `origin remote does not match` or `origin push URL does not match`: fix the
-  clone's `origin`; setup requires both fetch and push identity to match.
-- `Orca already registers ... at ...`: reuse the reported path, or remove the
-  stale repo in the Orca desktop UI, verify with `orca repo list --json`, and
-  rerun setup; automatic rebinding is intentionally refused.
-- Orca CLI/runtime failure: start or update Orca, then rerun setup.
-- Missing `orca-prefill.ts`, `orca-agent-status.ts`, or
-  `orca-titlebar-spinner.ts`: launch Pi from Orca once. If they remain missing,
-  repair or update Orca's Pi integration; Harness cannot install these files.
-
-- `setup refused while job ... is active`: inspect `pnpm harness status` and
-  finish the normal flow or reconcile with `recover --dry-run`; never edit or
-  delete the ledger by hand.
-- `validation-scripts` is `WARN`: this alone is non-fatal; use doctor's final
-  `Result` line as the pass/fail decision.
-
-## Wayfinder Map selection
-
-A ready-labeled issue with GitHub sub-issues is a Wayfinder Map container, not
-an executable task. The picker keeps top-level issues ordered by issue number,
-but replaces each Map with at most one frontier child selected in the original
-GitHub sub-issue order. A child must be open, carry `issueLabel`, have no open
-blocker or assignee, and not already be in the ledger. Parented children are
-considered only through their Map, so issue-number sorting cannot bypass Map
-order.
-
-The Map and executable children must be present in the ready-labeled snapshot.
-An open child encountered before a winner but missing the ready label closes
-that Map's frontier for the poll; incomplete, conflicting, or nested topology
-also fails closed. A Map with no frontier does not block an unrelated
-standalone issue or later Map.
-
-This support is selection-only: the controller does not add assignees, mutate
-labels, resolve children, or close a completed Map. `run-once --issue N` asserts
-that `N` is the current picker winner; it never overrides Map order or gates.
-Only one Map level and native GitHub sub-issues are supported; task-list body
-fallbacks and nested Maps are out of scope.
-
-## Operating modes
-
-### Recommended operator flow
-
-For first use or attended operation, prefer `work --once`. Every invocation
-re-inspects the ledger, GitHub, and Orca, then performs only the single automatic
-action allowed by current state:
-
-```bash
-cd "$HOME/github-agent-harness"
-
-# Inspect current work
-pnpm harness status
-
-# Preview the next action
-pnpm harness work --dry-run --once
-
-# Execute one action; repeat until a PR exists or explicit recovery is required
-pnpm harness work --once
-
-# Confirm the result
-pnpm harness status
-```
-
-The usual progression is claim and implement → audit/rework → push and create a
-PR → wait for a human merge or GitHub auto-merge. After the PR is merged, run
-`work --once` again or wait for the next `watch` tick so the controller records
-the merge and frees the single-job slot.
-
-### Merge policy
-
-`wait` is the default. `auto` is opt-in and never performs a direct merge:
-
-```yaml
+~~~yaml
 mergePolicy:
   mode: auto
   autoMerge: true
-```
+~~~
 
-Before enabling it, configure GitHub's **Allow auto-merge** and a branch rule
-with one or more required status checks. On every request, Harness verifies
-that rule and that the PR head exactly matches its audited head. A missing CI
-rule or head mismatch blocks the job; CI failures, requested changes, and
-GitHub auto-merge errors keep the slot occupied.
+Before each request, Harness verifies a required-check rule, the PR target
+branch, and that the PR head is exactly the audited commit. Missing rules or a
+changed head block the job instead of merging another commit.
 
-Run only one controller at a time. Do not start overlapping `work`/`watch`
-processes or run Harness concurrently on two machines.
+## Use
 
-### Manual one-shot commands
+### Inspect and advance one step
 
-Each command has an explicit stopping point; no one command is the entire
-pipeline.
+Use this flow while you are watching the controller:
 
-| Command | Description |
-|---|---|
-| `pnpm harness work --once` | Run one freshly inspected automatic coordinator action; never execute explicit recovery |
-| `pnpm harness run-once` | Claim an issue, create or reuse the worktree, and finish implementation; no push or PR |
-| `pnpm harness audit-once` | Run the independent Pi audit and controlled rework when needed; no PR |
-| `pnpm harness publish-once` | Push and create or reuse the PR after audit passes, then stop at `awaiting_merge` |
-| `pnpm harness wait-merge --timeout-minutes 60` | Poll GitHub; in auto mode request GitHub auto-merge, never direct-merge |
-| `pnpm harness recover --dry-run` | Show the ensure step that should resume after a crash, without changing state |
-| `pnpm harness recover --execute` | Execute the reconciled recovery step |
-| `pnpm harness status` | Show the active job, recent jobs, and Orca state |
-
-### Unified work and foreground watch
-
-`work` is the unified coordinator entrypoint. It re-inspects before every cycle,
-runs at most one automatic action per cycle, and stops at a stable state,
-`awaiting_merge`, a failure, or any action that requires explicit recovery.
-Use `--once` to limit it to one cycle.
-
-```bash
-pnpm harness work --once
-pnpm harness work --repo OWNER/REPO --max-cycles 10 --poll-seconds 30
+~~~bash
+pnpm harness status
 pnpm harness work --dry-run --once
-```
+pnpm harness work --once
+~~~
 
-> **Warning: `watch` is an active compatibility controller, not a passive merge
-> monitor.** With no active job, it can claim the next eligible labeled issue.
-> Later ticks can dispatch agents, run the audit, and push and create a PR.
+Each call rechecks GitHub, Orca, and the ledger. It performs at most one safe
+action: claim and implement, audit, publish a PR, or observe a merge.
 
-```bash
-pnpm harness watch
-pnpm harness watch --once
-pnpm harness watch --dry-run --once
-pnpm harness watch --max-cycles 10 --poll-seconds 30
-```
+### Run continuously
 
-Today `watch` runs only as a foreground process; monitoring stops when its
-terminal or process exits. The default interval comes from
-`pollIntervalSeconds` (currently 120 seconds). `SIGINT` and `SIGTERM` stop it
-after the current cycle.
+Use one foreground watcher when you want the controller to continue after a
+merge:
 
-Each `watch` tick:
+~~~bash
+pnpm harness watch --poll-seconds 30
+~~~
 
-1. Reconcile the active job from the same evidence used by `recover`.
-2. Execute at most one automatic coordinator action: `run-once`, `audit-once`,
-   `publish-once`, or one `wait-merge` poll.
-3. With no active job, try to claim and implement the next eligible issue; a
-   later tick performs the audit after a fresh inspection.
-4. Stop rather than execute an explicit recovery action. The operator must use
-   `recover --dry-run` and then `recover --execute`.
-5. After GitHub or a human merges the PR, the next poll records `mergedAt` and frees the
-   single ledger slot, while retaining the Orca worktree for inspection.
-6. A `blocked` job keeps the slot. CI failures or requested changes do not
-   automatically trigger rework while waiting for merge.
-7. Auto mode requests GitHub auto-merge only; it never direct-merges or deletes completed worktrees.
+After GitHub or a human merges the PR, the next watcher tick marks the job
+merged, releases the slot, and claims the next eligible issue. Run only one
+controller at a time and never run the same configured work from two machines.
 
-### launchd service (deferred)
+In auto mode, Harness requests:
 
-This repository currently has **no** launchd plist and no
-install/start/status/uninstall service commands, and it does not install or
-start a persistent watcher. Use foreground `pnpm harness watch` until the
-production repository enables the service.
+~~~text
+gh pr merge --auto --match-head-commit <audited-sha>
+~~~
 
-Before launchd is enabled, the production repository must at minimum:
+GitHub waits for its required checks. A failed check, requested changes, a
+closed PR, or an auto-merge error keeps the job visible for explicit recovery;
+Harness does not auto-rework or jump to another issue.
 
-- Pin the Node executable, repository working directory, and built CLI path.
-- Provide `HOME` and a stable `PATH` so `gh`, `git`, `orca`, and `pi` resolve.
-- Run `doctor` before loading, configure stdout/stderr logs, and verify
-  single-instance and uninstall behavior.
-- Before enabling login startup and crash restart, verify that `bootout` exits
-  promptly during the synchronous poll sleep; current signal handling may be
-  delayed by up to one poll interval.
-- Never run alongside a manually started foreground watcher, never store
-  tokens in the plist, and define log rotation.
-- Explicitly inherit the full `watch` behavior above, including its configured
-  GitHub auto-merge policy and no worktree deletion.
+### Recover safely
 
-## Recovery and reliability
+If the process stops or a job is blocked, inspect before doing anything else:
 
-After a controller crash, do not claim a new issue directly. `recover` is the
-explicit-recovery compatibility adapter; even `--execute` does not claim when
-there is no active job. Run:
-
-```bash
+~~~bash
+pnpm harness status
 pnpm harness recover --dry-run
-pnpm harness recover --execute
-```
+~~~
 
-| Ledger state | Resume action |
-|---|---|
-| `claimed` / `worktree_ready` / `implementing` | `run-once`: reuse the worktree; verify and finalize existing commits without re-waiting |
-| `awaiting_audit` / `auditing` / `reworking` | `audit-once`: reuse only same-round, exact-SHA results with complete provenance |
-| `audit_passed` / `publishing` | `publish-once`: find and reuse the PR by head |
-| `awaiting_merge` | `wait-merge`: poll, request GitHub auto-merge in auto mode, and record the result |
-| Recoverable blocked audit | `audit-once`: re-enter the normal gate |
-| Completed malformed audit | Explicit `recover --execute`: discard the malformed artifact and dispatch a fresh auditor for the same round |
-| Ended implementation with no commits | Redispatch in the same worktree only through explicit `recover --execute` |
-| Other `blocked` | Stop and keep the slot |
-| `merged` / no active job | Safe to claim the next issue |
+Use **recover --execute** only after reviewing the plan. Do not edit
+**data/harness.sqlite** by hand.
 
-Never edit the ledger by hand or use an ad-hoc script to accept
-`.harness/audit-result.json`. Malformed results remain invalid and can only be
-recovered by a fresh, fenced audit through `recover --execute`. All audits must
-re-enter the strict gate through `audit-once` or `recover --execute`.
+## Reference
 
-Before claiming, `run-once` refreshes the configured remote-tracking `baseRef`,
-pins its full SHA, and requires the Orca worktree HEAD to match exactly. It
-requires an idle TUI before dispatch and probes for the task id or fresh Working
-signals afterward. A `worker_done` message must match the current task and the
-recorded dispatch id.
-
-## Active Pi roles
-
-```yaml
-activeProfiles:
-  implementer: pi-implementer
-  auditor: pi-reviewer
-```
-
-| Role | Profile | Permissions and responsibility |
-|---|---|---|
-| Implementer | `pi-implementer` | Uses `read,edit,write,bash,subagent` for implementation, tests, commits, rework, and isolated internal two-axis review |
-| Auditor parent | `pi-reviewer` | Must not modify tracked files or HEAD; may write the sole gate artifact `.harness/audit-result.json` |
-| Internal reviewer | `harness-reviewer` | Fresh user scope, no artifacts, returns only a Standards or Spec report to its parent |
-
-The implementer explicitly loads controller-owned Matt `implement` and `tdd`
-pinned to
-[`ed37663`](https://github.com/mattpocock/skills/tree/ed37663cc5fbef691ddfecd080dff42f7e7e350d),
-plus the Pi-adapted `code-review`. It loads only Orca prefill/status and the
-approved `pi-subagents` version; ReadSeek is not loaded. Automatic skill,
-extension, prompt-template, and project Pi resource discovery are disabled,
-while repository `AGENTS.md` / `CLAUDE.md` context remains enabled.
-
-The Pi CLI and pinned `pi-subagents` live in the project `node_modules` tree and
-update through `pnpm install --frozen-lockfile`. Provider credentials and
-Orca-managed extensions remain user-scoped and are never stored in the repo.
-
-The implementer and auditor still share the parent Pi provider/model and
-`PI_CODING_AGENT_DIR`; role-level provider/config isolation remains deferred.
-Internal reviewers use a wrapper that removes the parent's Orca lifecycle
-handles.
-
-> Pi's tool allowlist is **not an OS sandbox**. In particular, `bash` and
-> TypeScript extensions retain the Pi process's filesystem, credential, and
-> network access. Real isolation must be enforced outside Pi.
-
-## Hard rules
-
-1. Agents never create, add, or remove GitHub labels.
-2. At most one issue may be in flight globally; only merge or explicit
-   cancellation frees the slot.
-3. Only the implementer may modify tracked product files; the auditor may write
-   only the gate artifact.
-4. No PR may be created before the independent Pi audit passes.
-5. Do not claim the next issue before the PR is merged.
-6. Closed-unmerged, audit-exhausted, or revoked issues must block; never skip
-   ahead.
-7. Never direct-merge or auto-delete completed worktrees; auto mode may only request GitHub auto-merge.
-
-## Configuration, state, and decisions
-
-- Configuration: [`config/harness.yaml`](config/harness.yaml)
-- Business state: `data/harness.sqlite`
-- Runtime logs: controller foreground output and Orca terminals
-- Architecture decisions: [`docs/decisions.md`](docs/decisions.md)
-
-Orca is the sole execution layer for worktrees, terminals, dispatches, tasks,
-and `worker_done`; the SQLite ledger is authoritative for business state.
+- Configuration: [config/harness.yaml](config/harness.yaml)
+- Design decisions: [docs/decisions.md](docs/decisions.md)
+- CLI command list: [src/cli.ts](src/cli.ts)
