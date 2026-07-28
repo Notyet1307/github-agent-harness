@@ -298,6 +298,7 @@ export function enablePullRequestAutoMerge(
       "--auto",
       "--match-head-commit",
       expectedHeadSha,
+      "--merge",
     ],
     { timeoutMs: 120_000 },
   );
