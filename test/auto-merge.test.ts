@@ -28,6 +28,7 @@ function createFixture(
   t: test.TestContext,
   options: {
     prHead: string;
+    baseRefName?: string;
     mergeExitCode?: number;
     requiredChecks?: string[];
     autoMergeRequested?: boolean;
@@ -67,7 +68,7 @@ if (args[0] === "pr" && args[1] === "view") {
     statusCheckRollup: [],
     headRefName: "agent/issue-1",
     headRefOid: ${JSON.stringify(options.prHead)},
-    baseRefName: "main",
+    baseRefName: ${JSON.stringify(options.baseRefName ?? "main")},
     autoMergeRequest: ${options.autoMergeRequested ? '{ enabledAt: "2026-07-28T00:00:00Z" }' : "null"}
   }));
 } else if (args[0] === "pr" && args[1] === "merge") {
@@ -210,8 +211,48 @@ test("auto mode requests GitHub auto-merge for the audited PR head", (t) => {
         .trim()
         .split("\n")
         .map((line) => JSON.parse(line) as string[]),
-      [["pr", "merge", "1", "--repo", "owner/repo", "--auto"]],
+      [
+        [
+          "pr",
+          "merge",
+          "1",
+          "--repo",
+          "owner/repo",
+          "--auto",
+          "--match-head-commit",
+          "b".repeat(40),
+        ],
+      ],
     );
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("auto mode blocks a PR that targets a different base branch", (t) => {
+  const fixture = createFixture(t, {
+    prHead: "b".repeat(40),
+    baseRefName: "release",
+  });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${join(fixture.dir, "bin")}:${originalPath ?? ""}`;
+  try {
+    const result = waitMerge({
+      configPath: fixture.configPath,
+      ledgerPath: fixture.ledgerPath,
+      lockPath: fixture.lockPath,
+      timeoutMinutes: 0,
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(
+      result.message,
+      /PR base release differs from configured default branch main/,
+    );
+    assert.equal(existsSync(fixture.mergeCallsPath), false);
+    const ledger = new Ledger(fixture.ledgerPath);
+    assert.equal(ledger.getJob("job-1")?.state, "blocked");
+    ledger.close();
   } finally {
     process.env.PATH = originalPath;
   }

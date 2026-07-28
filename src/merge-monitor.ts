@@ -253,6 +253,15 @@ function pollMergeOnce(
   }
 
   if (config.mergePolicy.mode === "auto") {
+    if (viewed.pr.baseRefName !== repo.defaultBranch) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        `PR base ${viewed.pr.baseRefName ?? "unknown"} differs from configured default branch ${repo.defaultBranch}`,
+      );
+    }
     const branchRules = branchHasRequiredStatusChecks(repo);
     if (!branchRules.ok) {
       return blockAutoMerge(
@@ -291,7 +300,11 @@ function pollMergeOnce(
       );
     }
     if (!viewed.pr.autoMergeRequest) {
-      const requested = enablePullRequestAutoMerge(repo, viewed.pr.number);
+      const requested = enablePullRequestAutoMerge(
+        repo,
+        viewed.pr.number,
+        job.head_sha,
+      );
       if (!requested.ok) {
         const error = `GitHub auto-merge request failed: ${requested.error ?? "unknown"}`;
         const updated = ledger.updateJobIf(job.id, job.revision, {

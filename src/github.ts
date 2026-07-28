@@ -285,10 +285,20 @@ export function viewPullRequest(
 export function enablePullRequestAutoMerge(
   repo: RepoConfig,
   number: number,
+  expectedHeadSha: string,
 ): { ok: boolean; error?: string } {
   const result = execFile(
     "gh",
-    ["pr", "merge", String(number), "--repo", repo.github, "--auto"],
+    [
+      "pr",
+      "merge",
+      String(number),
+      "--repo",
+      repo.github,
+      "--auto",
+      "--match-head-commit",
+      expectedHeadSha,
+    ],
     { timeoutMs: 120_000 },
   );
   if (!result.ok) {
