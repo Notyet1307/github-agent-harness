@@ -151,20 +151,35 @@ export function runRecoveryCycle(options: {
       }
       if (
         !recoveryError &&
-        action.recovery === "retry_malformed_result" &&
+        (action.recovery === "retry_malformed_result" ||
+          action.recovery === "retry_stale_result") &&
         job.worktree_path &&
         job.base_sha &&
         head
       ) {
+        const expectedArtifactStatus =
+          action.recovery === "retry_malformed_result" ? "malformed" : "stale";
         if (!job.auditor_task_id) {
           recoveryError =
-            "cannot recover malformed audit without the completed auditor task";
+            `cannot recover ${expectedArtifactStatus} audit without the completed auditor task`;
         } else if (hints.auditTaskStatus?.toLowerCase() !== "completed") {
           recoveryError =
-            "cannot recover malformed audit before the auditor task completes";
-        } else if (job.audit_round <= 0 || job.audit_head_sha !== head) {
+            `cannot recover ${expectedArtifactStatus} audit before the auditor task completes`;
+        } else if (job.audit_round <= 0) {
+          recoveryError =
+            `cannot recover ${expectedArtifactStatus} audit without audit-round provenance`;
+        } else if (
+          action.recovery === "retry_malformed_result" &&
+          job.audit_head_sha !== head
+        ) {
           recoveryError =
             "cannot recover malformed audit without same-round HEAD provenance";
+        } else if (
+          action.recovery === "retry_stale_result" &&
+          job.audit_head_sha === head
+        ) {
+          recoveryError =
+            "cannot recover stale audit without a newer committed HEAD";
         } else {
           const artifact = inspectAuditArtifact(
             join(job.worktree_path, ".harness", "audit-result.json"),
@@ -174,10 +189,10 @@ export function runRecoveryCycle(options: {
           const dirty = trackedDirty(job.worktree_path);
           if (dirty) {
             recoveryError =
-              `cannot recover malformed audit with tracked changes:\n${dirty}`;
-          } else if (artifact.status !== "malformed") {
+              `cannot recover ${expectedArtifactStatus} audit with tracked changes:\n${dirty}`;
+          } else if (artifact.status !== expectedArtifactStatus) {
             recoveryError =
-              `cannot recover malformed audit after artifact changed to ${artifact.status}`;
+              `cannot recover ${expectedArtifactStatus} audit after artifact changed to ${artifact.status}`;
           }
         }
       }
@@ -231,7 +246,8 @@ export function runRecoveryCycle(options: {
       }
       if (
         action.recovery === "retry_malformed_result" ||
-        action.recovery === "retry_validation_only_rework"
+        action.recovery === "retry_validation_only_rework" ||
+        action.recovery === "retry_stale_result"
       ) {
         ledger.updateJob(job.id, {
           state:
@@ -253,7 +269,7 @@ export function runRecoveryCycle(options: {
             { force: true },
           );
         } catch (err) {
-          const error = `failed to clear malformed audit result: ${(err as Error).message}`;
+          const error = `failed to clear audit result: ${(err as Error).message}`;
           ledger.updateJob(job.id, {
             state: "blocked",
             last_error: error,

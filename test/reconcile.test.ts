@@ -334,6 +334,32 @@ test("blocked malformed audit routes to a fresh explicit recovery", () => {
   }
 });
 
+test("blocked stale audit retries against a newer clean HEAD", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error: "auditor reported uncertain",
+    }),
+    {
+      auditArtifactStatus: "stale",
+      auditResultReady: false,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "newer-head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_stale_result");
+  }
+});
+
 test("blocked malformed audit stays blocked without completed provenance", () => {
   const action = reconcileJob(
     job({
