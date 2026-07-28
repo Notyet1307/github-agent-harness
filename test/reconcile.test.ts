@@ -360,6 +360,29 @@ test("blocked stale audit retries against a newer clean HEAD", () => {
   }
 });
 
+test("blocked transient push failure retries publishing with current audit evidence", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error: "git push failed: authentication unavailable",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "publish_once");
+});
+
 test("blocked malformed audit stays blocked without completed provenance", () => {
   const action = reconcileJob(
     job({

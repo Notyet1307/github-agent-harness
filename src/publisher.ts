@@ -170,11 +170,12 @@ function publishOnceLocked(
     { timeoutMs: 120_000 },
   );
   if (!push.ok) {
-    return block(
-      ledger,
-      job,
-      `git push failed: ${push.stderr || push.error || push.stdout}`,
-    );
+    const error = `git push failed: ${push.stderr || push.error || push.stdout}`;
+    ledger.updateJob(job.id, {
+      state: "audit_passed",
+      last_error: error,
+    });
+    return { ok: false, jobId: job.id, message: error };
   }
   log("push ok");
 

@@ -177,6 +177,23 @@ export function reconcileJob(
         };
       }
       if (
+        job.last_error?.startsWith("git push failed:") &&
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        hints.auditArtifactStatus === "current" &&
+        hints.auditResultReady === true &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "publish_once",
+          reason:
+            "blocked push has current completed audit evidence; retry publishing",
+        };
+      }
+      if (
         job.auditor_task_id &&
         job.audit_round > 0 &&
         job.audit_head_sha === hints.currentHeadSha &&

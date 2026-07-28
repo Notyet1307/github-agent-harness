@@ -129,6 +129,12 @@ export function runRecoveryCycle(options: {
       }
       return { ...base, ok: false, message: action.reason };
     }
+    if (job?.state === "blocked" && action.kind === "publish_once") {
+      job = ledger.updateJob(job.id, {
+        state: "audit_passed",
+        last_error: null,
+      });
+    }
     if (job?.state === "blocked" && action.kind === "audit_once") {
       const head = job.worktree_path
         ? revParse(job.worktree_path, "HEAD")
