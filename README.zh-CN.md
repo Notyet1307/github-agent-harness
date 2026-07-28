@@ -19,7 +19,7 @@ audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执�
 | 阶段 | 命令 | 状态 |
 |---|---|---|
 | M0 | `pnpm harness doctor` | 已实现：检查配置与运行环境 |
-| 项目接入 | `pnpm harness project add/setup` | 已实现：幂等绑定本地 Git 与 Orca |
+| 新电脑接入 | `pnpm harness setup` | 已实现：幂等完成 Git、GitHub、配置与 Orca 接入 |
 | M1 | `pnpm harness pick --dry-run` | 已实现：只读选取预览 |
 | M2 | `pnpm harness run-once` | 已实现：停在实现提交完成 |
 | M3 | `pnpm harness audit-once` | 已实现：Pi 双轴 audit 与 rework gate，不创建 PR |
@@ -28,34 +28,201 @@ audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执�
 | M6 | `pnpm harness watch` | 已实现：前台轮询控制器，不自动合并 |
 | 部署 | macOS `launchd` | 延后：本仓库没有 plist 或服务命令 |
 
-## 快速开始
+## 新电脑接入
 
-需要 Node.js 22.19+、pnpm、已认证的 `gh`、可用的 Orca runtime，以及已配置
-provider 凭证的 Pi 用户目录。Pi CLI 与 `pi-subagents` 由项目依赖固定版本。
+当前接入边界是刻意设计的：GitHub identity 与策略进入版本控制；本机路径、Orca id、
+SQLite ledger、extensions 和凭证都留在本机。换电脑时应重建这些本地绑定，不应复制
+旧电脑的 ledger，也不应把绝对路径写进 YAML。
 
-新电脑 clone Harness 和目标仓库后，运行一次幂等 setup：
+### `setup` 会自动完成什么
+
+`pnpm harness setup --repo OWNER/REPO --path /absolute/path/to/repo` 是新电脑接入的
+主命令。它会：
+
+1. 验证路径是绝对路径、可读取，且属于 Git worktree。
+2. 验证 `origin` 的所有 fetch/push URL 都指向 `OWNER/REPO`。
+3. 从 GitHub 发现或校验默认分支，并校验 `origin/...` 形式的 base ref。
+4. 在 Orca 中注册或复用 Harness 仓库和目标仓库。
+5. 设置目标 Orca repo 的 worktree base ref。
+6. 仅在需要时把可移植的 repository 配置写入 `config/harness.yaml`，同时保留无关
+   YAML 内容与文件权限。
+7. 真实 setup 成功后自动运行 doctor。
+
+Setup **不会** clone 仓库、安装或登录外部工具、创建 GitHub label、复制 provider
+凭证、安装 Orca 管理的 Pi extensions、领取 issue、创建任务 worktree 或合并 PR。
+本地 ledger 存在 active job 时，真实 setup 会拒绝执行。
+
+### 1. 准备本机依赖
+
+| 依赖 | 要求 | 检查命令 |
+|---|---|---|
+| Node.js | 22.19 或更高 | `node --version` |
+| pnpm | 必须是 `packageManager` 声明的 10.26.1 | `pnpm --version` |
+| Git | 能 clone、fetch 和 push 目标仓库 | `git --version` |
+| GitHub CLI | 已登录且拥有目标仓库的 issue、branch、PR 权限 | `gh auth status` |
+| Orca | App 已启动，CLI runtime ready | `orca status` |
+| Pi 用户目录 | 已配置 provider/model，且 Orca Pi extensions 已生成 | 安装依赖后初始化，再用 `doctor` 验证 |
+
+`pnpm install` 会提供固定版本的 Pi CLI 与 `pi-subagents`，不需要全局安装 Pi。
+Harness 自有的 skills、prompts、launchers 和 auditor 定义都在本仓库中。Provider
+凭证与 Orca 生成的 Pi extensions 留在用户 Pi 目录，不进入 Git。
+
+### 2. Clone Harness 与目标仓库
+
+将 `OWNER/REPO` 与 `/absolute/path/to/repo` 替换为实际值：
 
 ```bash
-cd ~/github-agent-harness
+git clone https://github.com/Notyet1307/github-agent-harness.git \
+  "$HOME/github-agent-harness"
+
+git clone https://github.com/OWNER/REPO.git \
+  /absolute/path/to/repo
+```
+
+Setup 不负责 clone。目标路径必须已经是 Git worktree，并且 `origin` 的 fetch 与 push
+URL 都指向 `OWNER/REPO`。请传 Git 根目录的绝对路径；最简单的方式是在目标仓库中
+运行 `pwd`。
+
+### 3. 安装项目依赖
+
+```bash
+cd "$HOME/github-agent-harness"
+
+# 仅在尚未安装固定版本 pnpm 时执行。
+npm install --global pnpm@10.26.1
+
+pnpm --version  # 必须输出 10.26.1
 pnpm install --frozen-lockfile
+```
+
+文档中的 `pnpm harness ...` 命令通过 `tsx` 直接运行 TypeScript 入口，不需要先执行
+build。
+
+### 4. 首次初始化 Pi 与 Orca
+
+启动 Orca，再用本机计划使用的 provider/model 初始化项目内 Pi CLI：
+
+```bash
+orca open --json
+orca status --json
+
+cd "$HOME/github-agent-harness"
+pnpm exec pi
+```
+
+在 Pi TUI 中完成 provider/model 配置，确认进入空闲输入状态后退出。凭证必须留在 Pi
+用户目录或 provider 对应的环境变量中，不能写入本仓库。
+
+当前 Harness 还依赖 Orca Pi integration 管理的三个文件：
+`~/.pi/agent/extensions/orca-prefill.ts`、`orca-agent-status.ts` 与
+`orca-titlebar-spinner.ts`；如果设置了 `PI_CODING_AGENT_DIR`，则使用该目录下的对应
+文件。Harness 有意不保存 fallback 副本，也没有安装器。请先从 Orca 启动一次 Pi，
+让 Orca 初始化 integration。如果 doctor 仍报告文件缺失，停止接入并修复或更新
+Orca；不要从另一台电脑复制 extension 文件。
+
+### 5. 预览并执行接入
+
+```bash
+# 只读计划；仍会查询 GitHub 与 Orca。
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo \
+  --dry-run
+
+# 写入本机 Orca 绑定，以及必要的可移植配置项。
 pnpm harness setup \
   --repo OWNER/REPO \
   --path /absolute/path/to/repo
-pnpm harness doctor
-pnpm harness pick --dry-run
-pnpm test
 ```
 
-增加 `--dry-run` 可只读预览 Git、GitHub、Orca 与配置动作。`setup` 会注册或复用
-Harness 与目标仓库、设置 base ref，并在完成后运行 doctor；重复执行不会重复注册。
-主配置 [`config/harness.yaml`](config/harness.yaml) 只保存 GitHub identity、分支和
-策略，不保存 `/Users/...` 或 Orca repo id。运行时通过 Orca identity 解析当前电脑的
-路径和 id，无需人工编辑 YAML。
+Dry run 会输出 `PLAN` 与 `WOULD` actions，不写配置，也不修改 Orca。真实命令是幂等
+的：正确的 registration 与 base ref 会直接复用。如果该仓库原先不在跟踪配置中，
+请审查并有意识地提交 `config/harness.yaml` 变更。
 
-`project add/setup` 保留为底层单项目接入与修复命令。Setup 不会 clone、领取 issue、
-固定 base SHA，也不会创建或修改 GitHub 标签。
+如果不能使用 GitHub 默认分支，可显式覆盖：
 
-开始真实任务前，应确保 `doctor` 为 PASS，并先用 dry-run 核对将被领取的 issue。
+```bash
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo \
+  --default-branch main \
+  --base-ref origin/main
+```
+
+`baseRef` 必须使用 `origin`。任何显式分支都会先在 GitHub 上校验，再执行变更。
+
+### 6. 领取任务前验证
+
+```bash
+pnpm harness doctor
+pnpm harness pick --dry-run
+pnpm harness status
+```
+
+Doctor 最后一行必须是 `Result: PASS (no failures)`，并且 Picker 必须显示预期 issue，
+之后才能开始真实任务。目标仓库缺少可选 validation scripts 等 `WARN` 不会令 doctor
+失败。`pick --dry-run` 不写 ledger、不创建 worktree，也不修改 label。
+
+预览正确后，人工值守入口是：
+
+```bash
+pnpm harness work --dry-run --once
+pnpm harness work --once
+```
+
+修改 Harness 本身的贡献者还应运行 `pnpm test`；这是仓库回归测试，不是每个 operator
+cycle 的前置条件。
+
+### 状态分别存在哪里
+
+| 状态 | 位置 | 是否可移植 |
+|---|---|---|
+| GitHub repo slug、默认分支、base ref、profiles、策略 | `config/harness.yaml` | 是；进入 Git |
+| 目标路径与 Orca repo id | Orca repo inventory，按 GitHub identity 动态解析 | 否；用 `setup` 重建 |
+| Jobs 与全局单任务槽 | `data/harness.sqlite` | 否；本地文件且被忽略 |
+| Pi provider/model 凭证与 Orca 生成的 extensions | Pi 用户目录 | 否；本机状态 |
+| Harness Pi skills、agents、launchers 与固定依赖 | 本仓库及 `node_modules` | 通过 clone + `pnpm install` 重建 |
+
+不要在电脑之间复制 `data/harness.sqlite`。不要让两台电脑同时对同一组已配置任务运行
+controller；ledger 与单任务锁只能协调当前本地 checkout。
+
+### 日常更新与修复
+
+同一台电脑更新 Harness 通常不需要重新接入：
+
+```bash
+cd "$HOME/github-agent-harness"
+git pull --ff-only
+pnpm install --frozen-lockfile
+pnpm harness doctor
+```
+
+移动目标 checkout、重装 Orca 或丢失 Orca binding 后，重新运行顶层
+`setup --repo ... --path ...`。如果 Orca 已把同一 GitHub identity 注册在其他路径，
+setup 会 fail closed。当前公开 Orca CLI 没有 `repo remove` 命令；最安全的即时方案是
+继续使用已注册路径。如果必须移动，请在 Orca 桌面 UI 删除旧 repo，运行
+`orca repo list --json` 确认它已消失，再重新 setup。不要直接编辑 Orca 内部状态。
+
+`project add` 与 `project setup` 是底层接入/修复命令。`project setup --repo ...` 或
+`--all` 只修复当前 Orca inventory 已能解析的项目；目标路径尚未注册时，它不能替代
+新电脑上的顶层 setup。以上命令都不会创建 label、领取 issue、固定任务 base SHA 或
+执行 merge。
+
+### 常见接入失败
+
+- `project path must be absolute`：传入 Git 根目录的绝对路径。
+- `origin remote does not match` 或 `origin push URL does not match`：修复 clone 的
+  `origin`；fetch 与 push identity 都必须匹配。
+- `Orca already registers ... at ...`：使用提示中的已注册路径；或者在 Orca 桌面 UI
+  删除旧 repo，以 `orca repo list --json` 确认后重新 setup。系统有意拒绝自动改绑。
+- Orca CLI/runtime 失败：启动或更新 Orca，再重新运行 setup。
+- 缺少 `orca-prefill.ts`、`orca-agent-status.ts` 或 `orca-titlebar-spinner.ts`：先从
+  Orca 启动一次 Pi；如果仍然缺失，修复或更新 Orca Pi integration。Harness 不能
+  安装这些文件。
+- `setup refused while job ... is active`：运行 `pnpm harness status`，完成正常流程或用
+  `recover --dry-run` 对账；不要手工编辑或删除 ledger。
+- `validation-scripts` 为 `WARN`：它本身不阻断运行，以 doctor 最后一行的 `Result`
+  为最终判断。
 
 ## Wayfinder Map 选择
 
@@ -75,6 +242,34 @@ Map 和可执行 child 都必须出现在 ready 标签快照中。在 winner 之
 fallback 或嵌套 Map。
 
 ## 运行方式
+
+### 推荐：逐步推进
+
+首次运行或人工值守时，优先使用 `work --once`。每次调用都会重新检查 ledger、GitHub
+与 Orca，只执行当前状态允许的一个自动动作：
+
+```bash
+cd "$HOME/github-agent-harness"
+
+# 查看当前任务与状态
+pnpm harness status
+
+# 只读预览下一步
+pnpm harness work --dry-run --once
+
+# 执行下一步；按状态重复运行，直到创建 PR 或需要显式恢复
+pnpm harness work --once
+
+# 再次确认结果
+pnpm harness status
+```
+
+典型状态推进为：领取并实现 → audit/rework → push 并创建 PR → 等待人工 merge。
+Harness 永不自动 merge。PR 人工合并后，再运行一次 `work --once` 或等待下一个
+`watch` tick，controller 会记录合并并释放单任务槽。
+
+同一时间只能运行一个 controller。不要同时启动多个 `work`/`watch` 进程，也不要在
+两台电脑上同时运行 Harness。
 
 ### 分阶段命令
 

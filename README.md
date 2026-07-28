@@ -21,7 +21,7 @@ protection requirements are satisfied.
 | Milestone | Command | Status |
 |---|---|---|
 | M0 | `pnpm harness doctor` | Implemented: configuration and runtime checks |
-| Enrollment | `pnpm harness project add/setup` | Implemented: idempotent local Git + Orca binding |
+| New machine onboarding | `pnpm harness setup` | Implemented: idempotent Git, GitHub, config, and Orca enrollment |
 | M1 | `pnpm harness pick --dry-run` | Implemented: read-only picker preview |
 | M2 | `pnpm harness run-once` | Implemented: stops after implementation commits |
 | M3 | `pnpm harness audit-once` | Implemented: Pi two-axis audit and rework gate, no PR |
@@ -30,40 +30,219 @@ protection requirements are satisfied.
 | M6 | `pnpm harness watch` | Implemented: foreground polling controller, never auto-merges |
 | Deployment | macOS `launchd` | Deferred: this repository has no plist or service commands |
 
-## Quick start
+## New machine onboarding
 
-Requires Node.js 22.19+, pnpm, an authenticated `gh`, a ready Orca runtime, and
-a Pi user directory with provider credentials. The Pi CLI and `pi-subagents`
-versions are pinned as project dependencies.
+The onboarding boundary is deliberate: GitHub identity and policy are tracked,
+while paths, Orca ids, the SQLite ledger, extensions, and credentials remain
+machine-local. A new computer must recreate those local bindings; it should not
+copy another computer's ledger or edit absolute paths into YAML.
 
-After cloning the harness and target repository on a new machine, run the
-idempotent setup once:
+### What `setup` automates
+
+`pnpm harness setup --repo OWNER/REPO --path /absolute/path/to/repo` is the
+primary onboarding command. It:
+
+1. Validates that the path is an absolute, readable Git worktree.
+2. Verifies that every `origin` fetch/push URL identifies `OWNER/REPO`.
+3. Discovers or validates the GitHub default branch and `origin/...` base ref.
+4. Registers or reuses both the Harness repo and target repo in Orca.
+5. Sets the target Orca repo's worktree base ref.
+6. Writes only the portable repository entry to `config/harness.yaml` when
+   needed, preserving unrelated YAML and file permissions.
+7. Runs `doctor` after a successful real setup.
+
+Setup does **not** clone repositories, install or authenticate external tools,
+create GitHub labels, copy provider credentials, provision Orca-managed Pi
+extensions, claim an issue, create a worktree, or merge a PR. A real setup is
+refused while the local ledger has an active job.
+
+### 1. Prepare machine-local prerequisites
+
+| Dependency | Requirement | Check |
+|---|---|---|
+| Node.js | 22.19 or newer | `node --version` |
+| pnpm | Exactly 10.26.1, as declared by `packageManager` | `pnpm --version` |
+| Git | Able to clone, fetch, and push the target repo | `git --version` |
+| GitHub CLI | Authenticated with issue, branch, and PR access | `gh auth status` |
+| Orca | App running and CLI runtime ready | `orca status` |
+| Pi user scope | Provider/model configured; Orca Pi extensions generated | Initialize after dependency install; verify with `doctor` |
+
+`pnpm install` provides the pinned Pi CLI and `pi-subagents`; no global Pi
+installation is required. Harness-owned skills, prompts, launchers, and auditor
+definitions live in this repository. Provider credentials and Orca-generated
+Pi extensions stay in the user's Pi directory and are never committed.
+
+### 2. Clone the Harness and target repository
+
+Replace `OWNER/REPO` and `/absolute/path/to/repo` with real values:
 
 ```bash
-cd ~/github-agent-harness
+git clone https://github.com/Notyet1307/github-agent-harness.git \
+  "$HOME/github-agent-harness"
+
+git clone https://github.com/OWNER/REPO.git \
+  /absolute/path/to/repo
+```
+
+Setup never clones. The target path must already be a Git worktree whose
+`origin` fetch and push URLs both identify `OWNER/REPO`. Use the Git root's
+absolute path; running `pwd` inside the target repo is the simplest way to get
+it.
+
+### 3. Install project dependencies
+
+```bash
+cd "$HOME/github-agent-harness"
+
+# Only when pnpm is not already installed at the pinned version.
+npm install --global pnpm@10.26.1
+
+pnpm --version  # must print 10.26.1
 pnpm install --frozen-lockfile
+```
+
+No build step is required for the documented `pnpm harness ...` commands; they
+run the TypeScript entrypoint through `tsx`.
+
+### 4. Initialize Pi and Orca once
+
+Start Orca, then initialize the project-local Pi CLI with the provider/model
+that this machine will use:
+
+```bash
+orca open --json
+orca status --json
+
+cd "$HOME/github-agent-harness"
+pnpm exec pi
+```
+
+Complete Pi's provider/model setup in the TUI, confirm it reaches an idle prompt,
+then exit. Credentials remain under the Pi user directory or provider-specific
+environment variables; never put them in this repository.
+
+The current Harness also requires three files owned by Orca's Pi integration:
+`~/.pi/agent/extensions/orca-prefill.ts`, `orca-agent-status.ts`, and
+`orca-titlebar-spinner.ts` (or the equivalent directory selected by
+`PI_CODING_AGENT_DIR`). Harness deliberately has no fallback copies or installer
+for them. Launch Pi from Orca once so Orca can initialize its integration. If
+doctor still reports any of them missing, stop and repair or update Orca; do not
+copy extension files from another computer.
+
+### 5. Preview, then apply onboarding
+
+```bash
+# Read-only plan. This still queries GitHub and Orca.
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo \
+  --dry-run
+
+# Apply local Orca bindings and any required portable config entry.
 pnpm harness setup \
   --repo OWNER/REPO \
   --path /absolute/path/to/repo
-pnpm harness doctor
-pnpm harness pick --dry-run
-pnpm test
 ```
 
-Add `--dry-run` to inspect the Git, GitHub, Orca, and config actions without
-mutation. `setup` registers or reuses the harness and target repos, sets the
-base ref, and runs doctor when complete; reruns do not duplicate registration.
-The tracked [`config/harness.yaml`](config/harness.yaml) stores only GitHub
-identity, branches, and policy—not `/Users/...` paths or Orca repo ids. Runtime
-bindings are resolved from Orca identity on the current machine, so no manual
-YAML editing is required.
+The dry run prints `PLAN` plus `WOULD` actions and does not write config or
+mutate Orca. The real command is idempotent: correct registrations and base refs
+are reused. If the repository is new to the tracked config, review and commit
+the resulting `config/harness.yaml` change intentionally.
 
-`project add/setup` remain the lower-level single-project enrollment and repair
-commands. Setup never clones, claims an issue, pins a base SHA, or creates or
-modifies GitHub labels.
+Optional overrides are available when GitHub's default branch should not be
+used:
 
-Before real work, require a passing `doctor` result and use the dry-run picker to
-verify the issue that would be claimed.
+```bash
+pnpm harness setup \
+  --repo OWNER/REPO \
+  --path /absolute/path/to/repo \
+  --default-branch main \
+  --base-ref origin/main
+```
+
+`baseRef` must use `origin`. An explicit branch is checked against GitHub before
+anything is changed.
+
+### 6. Verify before claiming work
+
+```bash
+pnpm harness doctor
+pnpm harness pick --dry-run
+pnpm harness status
+```
+
+Do not start real work until doctor ends with `Result: PASS (no failures)` and
+the picker shows the intended issue. `WARN` checks, such as missing optional
+validation scripts in a target repo, do not make doctor fail. `pick --dry-run`
+does not write the ledger, create a worktree, or mutate labels.
+
+When the preview is correct, the attended entrypoint is:
+
+```bash
+pnpm harness work --dry-run --once
+pnpm harness work --once
+```
+
+Contributors changing the Harness itself should also run `pnpm test`; it is a
+repository regression suite, not a prerequisite for every operator cycle.
+
+### Where state lives
+
+| State | Location | Portable? |
+|---|---|---|
+| GitHub repo slug, default branch, base ref, profiles, policy | `config/harness.yaml` | Yes; tracked |
+| Target path and Orca repo id | Orca repo inventory, resolved by GitHub identity | No; recreate with `setup` |
+| Jobs and the global single-job slot | `data/harness.sqlite` | No; local and ignored |
+| Pi provider/model credentials and Orca-generated extensions | Pi user directory | No; machine-local |
+| Harness Pi skills, agents, launchers, and pinned packages | This repository and `node_modules` | Recreated by clone + `pnpm install` |
+
+Never copy `data/harness.sqlite` between computers. Never run controllers on
+two computers against the same configured work simultaneously; the ledger and
+single-job lock coordinate only one local checkout.
+
+### Routine updates and repairs
+
+Updating the Harness on the same computer normally needs no re-enrollment:
+
+```bash
+cd "$HOME/github-agent-harness"
+git pull --ff-only
+pnpm install --frozen-lockfile
+pnpm harness doctor
+```
+
+Rerun the top-level `setup --repo ... --path ...` after moving a target checkout,
+reinstalling Orca, or losing an Orca binding. Setup fails closed if Orca already
+registers the same GitHub identity at a different path. The current public Orca
+CLI has no `repo remove` command: the safest immediate option is to reuse the
+registered path. To move intentionally, remove the stale repo in the Orca
+desktop UI, confirm it no longer appears in `orca repo list --json`, then rerun
+setup. Never edit Orca's internal state directly.
+
+`project add` and `project setup` are lower-level enrollment/repair commands.
+`project setup --repo ...` or `--all` repairs projects that are already
+resolvable from the current Orca inventory; it is not the fresh-machine entry
+point when a target path has not been registered. None of these commands create
+labels, claim issues, pin a task base SHA, or merge PRs.
+
+### Common onboarding failures
+
+- `project path must be absolute`: pass the Git root's absolute path.
+- `origin remote does not match` or `origin push URL does not match`: fix the
+  clone's `origin`; setup requires both fetch and push identity to match.
+- `Orca already registers ... at ...`: reuse the reported path, or remove the
+  stale repo in the Orca desktop UI, verify with `orca repo list --json`, and
+  rerun setup; automatic rebinding is intentionally refused.
+- Orca CLI/runtime failure: start or update Orca, then rerun setup.
+- Missing `orca-prefill.ts`, `orca-agent-status.ts`, or
+  `orca-titlebar-spinner.ts`: launch Pi from Orca once. If they remain missing,
+  repair or update Orca's Pi integration; Harness cannot install these files.
+
+- `setup refused while job ... is active`: inspect `pnpm harness status` and
+  finish the normal flow or reconcile with `recover --dry-run`; never edit or
+  delete the ledger by hand.
+- `validation-scripts` is `WARN`: this alone is non-fatal; use doctor's final
+  `Result` line as the pass/fail decision.
 
 ## Wayfinder Map selection
 
@@ -88,6 +267,36 @@ Only one Map level and native GitHub sub-issues are supported; task-list body
 fallbacks and nested Maps are out of scope.
 
 ## Operating modes
+
+### Recommended operator flow
+
+For first use or attended operation, prefer `work --once`. Every invocation
+re-inspects the ledger, GitHub, and Orca, then performs only the single automatic
+action allowed by current state:
+
+```bash
+cd "$HOME/github-agent-harness"
+
+# Inspect current work
+pnpm harness status
+
+# Preview the next action
+pnpm harness work --dry-run --once
+
+# Execute one action; repeat until a PR exists or explicit recovery is required
+pnpm harness work --once
+
+# Confirm the result
+pnpm harness status
+```
+
+The usual progression is claim and implement → audit/rework → push and create a
+PR → wait for a human merge. Harness never merges automatically. After the PR
+is merged, run `work --once` again or wait for the next `watch` tick so the
+controller records the merge and frees the single-job slot.
+
+Run only one controller at a time. Do not start overlapping `work`/`watch`
+processes or run Harness concurrently on two machines.
 
 ### Manual one-shot commands
 
