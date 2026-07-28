@@ -5,7 +5,6 @@ import {
   defaultLockPath,
   getAuditorProfile,
   getImplementerProfile,
-  loadConfig,
 } from "./config.js";
 import {
   auditResultMatchesShas,
@@ -24,7 +23,7 @@ import {
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
-import { validateProjectRuntime } from "./project.js";
+import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   dispatchTaskEnsured,
   ensureAgentTerminal,
@@ -35,7 +34,7 @@ import {
   type DispatchWait,
 } from "./orca-runtime.js";
 import { renderAuditorSpec, renderReworkSpec } from "./prompts.js";
-import type { HarnessConfig, Job, RepoConfig } from "./types.js";
+import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type AuditOnceResult = {
   ok: boolean;
@@ -59,7 +58,7 @@ export function auditOnce(options: {
   /** When true, after fail rework once and re-audit until pass/block (M3 loop). */
   withRework?: boolean;
 }): AuditOnceResult {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const lockPath = options.lockPath ?? defaultLockPath();
   const lock = acquireLock(lockPath);
   if (!lock.ok) {
@@ -79,7 +78,7 @@ export function auditOnce(options: {
 }
 
 function auditOnceLocked(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
   options: {
     withRework: boolean;
@@ -332,7 +331,7 @@ function auditOnceLocked(
 }
 
 function runAuditPhase(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
   orcaCli: string,
   job: Job,
@@ -866,7 +865,7 @@ function runAuditPhase(
 }
 
 function runReworkPhase(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
   orcaCli: string,
   job: Job,

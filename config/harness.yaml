@@ -15,7 +15,6 @@ mergePolicy:
 orca:
   cliPath: orca
   cliPathFallback: /Applications/Orca.app/Contents/Resources/bin/orca
-  controllerWorktreePath: /Users/yang/github-agent-harness
   controllerTitle: harness-controller
 
 # Role → profile id.
@@ -29,7 +28,7 @@ agentProfiles:
     role: implementer
     runtime: orca
     orcaAgent: pi
-    command: "/Users/yang/github-agent-harness/scripts/pi-implementer"
+    command: scripts/pi-implementer
     invokeHint: "Explicitly invoke /skill:implement. Commit the intended implementation before /skill:code-review, review from the dispatched fixed base SHA, then address and commit any findings."
 
   codex-default:
@@ -46,13 +45,11 @@ agentProfiles:
     runtime: orca
     orcaAgent: pi
     # The launcher follows the parent Pi provider/model while isolating audit resources.
-    command: "/Users/yang/github-agent-harness/scripts/pi-auditor"
+    command: scripts/pi-auditor
     readonly: true
     invokeHint: "Explicitly invoke /skill:matt-code-review-pi with the fixed base SHA. Use only the controller-owned harness-reviewer in user scope."
 
 repositories:
   - github: Notyet1307/Exposure-Agent
-    localPath: /Users/yang/Test-drive-sales/Exposure-Agent
-    orcaRepoId: 4ce21f1a-acae-4184-9aca-7b287ab3ee34
     baseRef: origin/main
     defaultBranch: main

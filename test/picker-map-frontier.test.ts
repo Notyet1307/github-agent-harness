@@ -52,7 +52,6 @@ const config: HarnessConfig = {
   orca: {
     cliPath: "orca",
     cliPathFallback: "orca",
-    controllerWorktreePath: "/tmp/controller",
     controllerTitle: "controller",
   },
   activeProfiles: { implementer: "implementer", auditor: "auditor" },

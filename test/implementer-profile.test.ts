@@ -83,16 +83,11 @@ test("active implementer uses the controller-owned Pi writer profile", (t) => {
   const requiredResources = [
     join(piAgentDir, "extensions/orca-prefill.ts"),
     join(piAgentDir, "extensions/orca-agent-status.ts"),
-    join(piAgentDir, "npm/node_modules/pi-subagents/index.ts"),
   ];
   for (const path of requiredResources) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, "");
   }
-  writeFileSync(
-    join(piAgentDir, "npm/node_modules/pi-subagents/package.json"),
-    '{"name":"pi-subagents","version":"0.35.1"}',
-  );
 
   mkdirSync(fakeBinDir, { recursive: true });
   const fakePi = join(fakeBinDir, "pi");
@@ -112,6 +107,7 @@ test("active implementer uses the controller-owned Pi writer profile", (t) => {
     env: {
       ...process.env,
       PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+      HARNESS_PI_BINARY: fakePi,
       PI_AGENT_DIRS_PATH: agentDirsPath,
       PI_ARGS_PATH: argsPath,
       PI_CODING_AGENT_DIR: piAgentDir,
@@ -136,6 +132,17 @@ test("active implementer uses the controller-owned Pi writer profile", (t) => {
       ["--skill", skillPath],
     );
   }
+  const subagentsExtension = join(
+    harnessRoot,
+    "node_modules/pi-subagents/index.ts",
+  );
+  assert.deepEqual(
+    args.slice(
+      args.indexOf(subagentsExtension) - 1,
+      args.indexOf(subagentsExtension) + 1,
+    ),
+    ["--extension", subagentsExtension],
+  );
   assert.deepEqual(
     args.slice(args.indexOf("--tools"), args.indexOf("--tools") + 2),
     ["--tools", "read,edit,write,bash,subagent"],
@@ -185,54 +192,28 @@ test("doctor fails closed after a non-interactive Pi profile startup", (t) => {
   ]);
 });
 
-test("Pi implementer refuses an unpinned subagent extension", (t) => {
-  const root = mkdtempSync(join(tmpdir(), "harness-pi-version-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-
-  const piAgentDir = join(root, "pi-agent");
-  for (const path of [
-    join(piAgentDir, "extensions/orca-prefill.ts"),
-    join(piAgentDir, "extensions/orca-agent-status.ts"),
-    join(piAgentDir, "npm/node_modules/pi-subagents/index.ts"),
-  ]) {
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, "");
-  }
-  writeFileSync(
-    join(piAgentDir, "npm/node_modules/pi-subagents/package.json"),
-    '{"name":"pi-subagents","version":"99.0.0"}',
+test("Pi implementer uses the pinned project-local subagent extension", () => {
+  const harnessRoot = process.cwd();
+  const packagePath = join(
+    harnessRoot,
+    "node_modules/pi-subagents/package.json",
   );
+  const installed = JSON.parse(readFileSync(packagePath, "utf8")) as {
+    name?: string;
+    version?: string;
+  };
+  const manifest = JSON.parse(
+    readFileSync(join(harnessRoot, "package.json"), "utf8"),
+  ) as { devDependencies?: Record<string, string> };
 
-  const fakeBinDir = join(root, "bin");
-  const markerPath = join(root, "pi-ran");
-  mkdirSync(fakeBinDir, { recursive: true });
-  const fakePi = join(fakeBinDir, "pi");
-  writeFileSync(fakePi, `#!/bin/sh\ntouch "${markerPath}"\n`);
-  chmodSync(fakePi, 0o755);
-
-  const result = spawnSync(implementerLauncher, [], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
-      PI_CODING_AGENT_DIR: piAgentDir,
-    },
-  });
-
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /requires pi-subagents@0\.35\.1/);
-  assert.equal(
-    spawnSync("test", ["-e", markerPath]).status,
-    1,
-    "Pi must not start with an unapproved extension version",
-  );
+  assert.equal(installed.name, "pi-subagents");
+  assert.equal(installed.version, manifest.devDependencies?.["pi-subagents"]);
 });
 
-test("Pi implementer refuses missing runtime extensions", (t) => {
+test("Pi implementer refuses missing Orca runtime extensions", (t) => {
   const requiredPaths = [
     "extensions/orca-prefill.ts",
     "extensions/orca-agent-status.ts",
-    "npm/node_modules/pi-subagents/index.ts",
   ];
 
   for (const missingPath of requiredPaths) {
@@ -246,20 +227,9 @@ test("Pi implementer refuses missing runtime extensions", (t) => {
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, "");
     }
-    const packagePath = join(
-      piAgentDir,
-      "npm/node_modules/pi-subagents/package.json",
-    );
-    mkdirSync(dirname(packagePath), { recursive: true });
-    writeFileSync(
-      packagePath,
-      '{"name":"pi-subagents","version":"0.35.1"}',
-    );
 
-    const fakeBinDir = join(root, "bin");
     const markerPath = join(root, "pi-ran");
-    mkdirSync(fakeBinDir, { recursive: true });
-    const fakePi = join(fakeBinDir, "pi");
+    const fakePi = join(root, "pi");
     writeFileSync(fakePi, `#!/bin/sh\ntouch "${markerPath}"\n`);
     chmodSync(fakePi, 0o755);
 
@@ -267,7 +237,7 @@ test("Pi implementer refuses missing runtime extensions", (t) => {
       encoding: "utf8",
       env: {
         ...process.env,
-        PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+        HARNESS_PI_BINARY: fakePi,
         PI_CODING_AGENT_DIR: piAgentDir,
       },
     });
@@ -323,6 +293,7 @@ test("internal Pi reviewer children cannot inherit Orca lifecycle handles", (t) 
       encoding: "utf8",
       env: {
         ...process.env,
+        HARNESS_PI_BINARY: fakePi,
         ...Object.fromEntries(lifecycleNames.map((name) => [name, "secret"])),
         CHILD_ARGS_PATH: argsPath,
         CHILD_ENV_NAMES_PATH: envNamesPath,

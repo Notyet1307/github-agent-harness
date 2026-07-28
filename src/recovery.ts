@@ -4,11 +4,7 @@ import {
   inspectAuditArtifact,
   trackedDirty,
 } from "./audit-gate.js";
-import {
-  defaultLedgerPath,
-  defaultLockPath,
-  loadConfig,
-} from "./config.js";
+import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { checkAncestor, commitCountSince, revParse } from "./git.js";
 import { execFile } from "./exec.js";
 import {
@@ -18,7 +14,7 @@ import {
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaJson, requireOrcaCli, unwrapResult } from "./orca.js";
-import { validateProjectRuntime } from "./project.js";
+import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   classifyRecoverExecution,
   reconcileJob,
@@ -29,7 +25,7 @@ import { runOnce } from "./run-once.js";
 import { auditOnce } from "./audit-once.js";
 import { publishOnce } from "./publisher.js";
 import { waitMerge } from "./merge-monitor.js";
-import type { Job, RepoConfig } from "./types.js";
+import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type RecoverResult = {
   ok: boolean;
@@ -53,7 +49,7 @@ export function runRecoveryCycle(options: {
   /** When executing wait_merge, only poll once by default. */
   waitMergeTimeoutMinutes?: number;
 }): RecoverResult {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const lock = acquireLock(options.lockPath ?? defaultLockPath());
   if (!lock.ok) {
     return {
@@ -368,7 +364,7 @@ function executeAction(
 }
 
 function gatherHints(
-  config: ReturnType<typeof loadConfig>,
+  config: RuntimeHarnessConfig,
   job: Job | null,
   project: RepoConfig | null,
 ): ReconcileHints {

@@ -1,16 +1,12 @@
-import {
-  defaultLedgerPath,
-  defaultLockPath,
-  loadConfig,
-} from "./config.js";
+import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { execFile } from "./exec.js";
 import { viewPullRequest, type PullRequestView } from "./github.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
-import { validateProjectRuntime } from "./project.js";
+import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import { setWorktreeProgress } from "./orca-runtime.js";
-import type { HarnessConfig, Job } from "./types.js";
+import type { Job, RuntimeHarnessConfig } from "./types.js";
 
 export type WaitMergeResult = {
   ok: boolean;
@@ -36,7 +32,7 @@ export function waitMerge(options: {
   timeoutMinutes?: number;
   pollSeconds?: number;
 }): WaitMergeResult {
-  const config = loadConfig(options.configPath);
+  const config = loadRuntimeConfig(options.configPath);
   const ledgerPath = options.ledgerPath ?? defaultLedgerPath();
   const lockPath = options.lockPath ?? defaultLockPath();
   const timeoutMinutes = options.timeoutMinutes ?? 60;
@@ -91,7 +87,7 @@ export function waitMerge(options: {
 }
 
 function pollMergeOnce(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   ledger: Ledger,
   expectedJobId?: string,
 ): MergePollResult {

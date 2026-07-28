@@ -154,6 +154,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo list") {
+  console.log(JSON.stringify({ ok: true, result: { repos: [{
+    id: "repo-1",
+    path: ${JSON.stringify(repo)},
+    worktreeBaseRef: "upstream/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  }] } }));
 } else if (key === "repo show") {
   console.log(JSON.stringify({ ok: true, result: { repo: {
     id: "repo-1",
@@ -161,7 +168,7 @@ if (args[0] === "status") {
     worktreeBaseRef: "upstream/main",
     gitRemoteIdentity: { canonicalKey: "owner/repo" }
   } } }));
-} else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${dir}`)})) {
+} else if (key === "terminal list" && args.includes(${JSON.stringify(`path:${process.cwd()}`)})) {
   console.log(JSON.stringify({ ok: true, result: {
     terminals: [{ handle: "controller-1", title: "test-controller", connected: true }]
   } }));
@@ -203,7 +210,6 @@ issueLabel: ready-for-agent
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}
-  controllerWorktreePath: ${JSON.stringify(dir)}
   controllerTitle: test-controller
 activeProfiles:
   implementer: codex-default
@@ -331,6 +337,13 @@ if (args[0] === "status") {
     app: { running: true },
     runtime: { state: "ready", reachable: true }
   } }));
+} else if (key === "repo list") {
+  console.log(JSON.stringify({ ok: true, result: { repos: [{
+    id: "repo-1",
+    path: ${JSON.stringify(repo)},
+    worktreeBaseRef: "upstream/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  }] } }));
 } else if (key === "repo show") {
   console.log(JSON.stringify({ ok: true, result: { repo: {
     id: "repo-1",
@@ -356,7 +369,6 @@ issueLabel: ready-for-agent
 orca:
   cliPath: ${JSON.stringify(fakeOrca)}
   cliPathFallback: ${JSON.stringify(fakeOrca)}
-  controllerWorktreePath: ${JSON.stringify(dir)}
   controllerTitle: test-controller
 activeProfiles:
   implementer: codex-default

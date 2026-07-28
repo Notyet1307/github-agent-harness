@@ -5,6 +5,7 @@ import type {
   PickResult,
   PickSkip,
   RepoConfig,
+  RuntimeHarnessConfig,
 } from "./types.js";
 import { hasOpenBlockers } from "./types.js";
 
@@ -200,7 +201,7 @@ export function pickForRepo(
 }
 
 export function pickAll(
-  config: HarnessConfig,
+  config: RuntimeHarnessConfig,
   options: {
     ledgerByRepo?: Map<string, Set<number>>;
     hasActiveJob?: boolean;

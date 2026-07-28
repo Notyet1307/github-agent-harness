@@ -272,7 +272,6 @@ issueLabel: ready-for-agent
 orca:
   cliPath: ${JSON.stringify(fake.command)}
   cliPathFallback: ${JSON.stringify(fake.command)}
-  controllerWorktreePath: ${JSON.stringify(fake.dir)}
   controllerTitle: harness-controller
 activeProfiles:
   implementer: pi-implementer
@@ -365,6 +364,13 @@ const key = args.slice(0, 2).join(" ");
 const ok = (result) => console.log(JSON.stringify({ ok: true, result }));
 if (args[0] === "status") {
   ok({ app: { running: true }, runtime: { state: "ready", reachable: true } });
+} else if (key === "repo list") {
+  ok({ repos: [{
+    id: "repo-1",
+    path: ${JSON.stringify(repoPath)},
+    worktreeBaseRef: "origin/main",
+    gitRemoteIdentity: { canonicalKey: "owner/repo" }
+  }] });
 } else if (key === "repo show") {
   ok({ repo: {
     id: "repo-1",

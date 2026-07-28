@@ -3,6 +3,7 @@ set -eu
 
 script_dir=${0:A:h}
 harness_root=${script_dir:h}
+pi_binary=${HARNESS_PI_BINARY:-"$harness_root/node_modules/.bin/pi"}
 pi_agent_dir=${PI_CODING_AGENT_DIR:-${HOME}/.pi/agent}
 skill_path="$harness_root/pi/auditor/skills/matt-code-review-pi/SKILL.md"
 agent_dir="$harness_root/pi/auditor/agents"
@@ -11,10 +12,10 @@ extensions=(
   "$pi_agent_dir/extensions/orca-prefill.ts"
   "$pi_agent_dir/extensions/orca-agent-status.ts"
   "$pi_agent_dir/extensions/orca-titlebar-spinner.ts"
-  "$pi_agent_dir/npm/node_modules/pi-subagents/index.ts"
+  "$harness_root/node_modules/pi-subagents/index.ts"
 )
 
-for required_path in "$skill_path" "$agent_dir/harness-reviewer.md" "$reviewer_child" $extensions; do
+for required_path in "$pi_binary" "$skill_path" "$agent_dir/harness-reviewer.md" "$reviewer_child" $extensions; do
   if [[ ! -f "$required_path" ]]; then
     print -u2 "pi-auditor: missing required resource: $required_path"
     exit 1
@@ -29,7 +30,7 @@ for extension_path in $extensions; do
   extension_args+=(--extension "$extension_path")
 done
 
-exec pi \
+exec "$pi_binary" \
   --no-skills \
   --skill "$skill_path" \
   --no-prompt-templates \

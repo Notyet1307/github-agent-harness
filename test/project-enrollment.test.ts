@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,7 +14,15 @@ import {
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addProject, setupProjects } from "../src/project.js";
+import {
+  addProject,
+  ensureHarnessRepo,
+  loadRuntimeConfig,
+  resolveProjectBindings,
+  setupProjects,
+} from "../src/project.js";
+import { Ledger } from "../src/ledger.js";
+import { checkSetupIdle } from "../src/setup.js";
 import { loadConfig } from "../src/config.js";
 import { runDoctor } from "../src/doctor.js";
 
@@ -70,10 +79,17 @@ test("project add enrolls a repository and is idempotent", () => {
     assert.deepEqual(config.repositories, [
       {
         github: "Acme/Widget",
-        localPath: fixture.repoPath,
-        orcaRepoId: "orca-repo-1",
         baseRef: "origin/main",
         defaultBranch: "main",
+      },
+    ]);
+    assert.deepEqual(loadRuntimeConfig(fixture.configPath).repositories, [
+      {
+        github: "Acme/Widget",
+        baseRef: "origin/main",
+        defaultBranch: "main",
+        localPath: fixture.repoPath,
+        orcaRepoId: "orca-repo-1",
       },
     ]);
     const written = readFileSync(fixture.configPath, "utf8");
@@ -88,6 +104,113 @@ test("project add enrolls a repository and is idempotent", () => {
     });
     assert.equal(repeated.ok, true);
     assert.equal(repeated.status, "unchanged");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("runtime binding fails closed on duplicate Orca identities", () => {
+  const fixture = createFixture();
+  try {
+    assert.equal(
+      addProject({
+        configPath: fixture.configPath,
+        github: "Acme/Widget",
+        localPath: fixture.repoPath,
+      }).ok,
+      true,
+    );
+    const repo = JSON.parse(readFileSync(fixture.statePath, "utf8")).repo;
+    writeFileSync(
+      fixture.statePath,
+      JSON.stringify({
+        repos: [repo, { ...repo, id: "orca-repo-2", path: `${fixture.repoPath}-copy` }],
+      }),
+    );
+
+    const resolved = resolveProjectBindings(loadConfig(fixture.configPath));
+    assert.equal(resolved.ok, false);
+    if (!resolved.ok) assert.match(resolved.error, /multiple Orca repos match/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("runtime binding reports the setup command when missing", () => {
+  const fixture = createFixture();
+  try {
+    writeFileSync(
+      fixture.configPath,
+      `version: 1\nissueLabel: ready-for-agent\nrepositories:\n  - github: Acme/Widget\n    baseRef: origin/main\n    defaultBranch: main\norca:\n  cliPath: ${JSON.stringify(join(fixture.dir, "orca.cjs"))}\n  cliPathFallback: ${JSON.stringify(join(fixture.dir, "orca.cjs"))}\n`,
+    );
+
+    const resolved = resolveProjectBindings(loadConfig(fixture.configPath));
+    assert.equal(resolved.ok, false);
+    if (!resolved.ok) {
+      assert.match(
+        resolved.error,
+        /run harness setup --repo Acme\/Widget --path \/absolute\/path/,
+      );
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+
+test("setup idle gate rejects the canonical active job", () => {
+  const fixture = createFixture();
+  const ledgerPath = join(fixture.dir, "harness.sqlite");
+  const ledger = new Ledger(ledgerPath);
+  try {
+    const claimed = ledger.tryClaim({
+      id: "active-setup-job",
+      project: {
+        github: "Acme/Widget",
+        localPath: fixture.repoPath,
+        orcaRepoId: "orca-repo-1",
+        baseRef: "origin/main",
+        defaultBranch: "main",
+      },
+      issue: {
+        number: 1,
+        title: "Active setup job",
+        url: "https://example.test/issues/1",
+        updatedAt: "2026-07-27T00:00:00Z",
+        labels: ["ready-for-agent"],
+        blockedBy: [],
+      },
+      baseSha: "base-sha",
+      implementerProfileId: "pi-implementer",
+    });
+    assert.equal(claimed.ok, true);
+  } finally {
+    ledger.close();
+  }
+
+  try {
+    assert.deepEqual(checkSetupIdle(ledgerPath), {
+      ok: false,
+      jobId: "active-setup-job",
+      state: "claimed",
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("harness repo enrollment is idempotent", () => {
+  const fixture = createFixture();
+  try {
+    const config = loadConfig(fixture.configPath);
+    const first = ensureHarnessRepo(config);
+    const second = ensureHarnessRepo(config);
+
+    assert.equal(first.ok, true);
+    assert.equal(first.applied, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.applied, false);
+    assert.match(second.message, /already registered/);
   } finally {
     fixture.cleanup();
   }
@@ -110,6 +233,7 @@ test("project setup repairs an existing Orca base ref", () => {
           id: "orca-repo-1",
           path: fixture.repoPath,
           worktreeBaseRef: "origin/old-main",
+          gitRemoteIdentity: { canonicalKey: "github.com/Acme/Widget" },
         },
       }),
     );
@@ -251,17 +375,23 @@ test("doctor fails when a configured Orca binding needs repair", () => {
     });
     assert.equal(created.ok, true);
     const config = readFileSync(fixture.configPath, "utf8").replace(
-      "orcaRepoId: orca-repo-1",
-      "orcaRepoId: stale-id",
+      "repositories: [ { github: Acme/Widget, baseRef: origin/main, defaultBranch: main } ]",
+      "repositories:\n  - github: Acme/Widget\n    localPath: /tmp/stale\n    orcaRepoId: stale-id\n    baseRef: origin/main\n    defaultBranch: main",
     );
     writeFileSync(fixture.configPath, config);
 
+    writeFileSync(fixture.callsPath, "");
     const report = runDoctor(fixture.configPath);
     const enrollment = report.checks.find(
       (check) => check.name === "repo:Acme/Widget:enrollment",
     );
     assert.equal(enrollment?.level, "fail");
     assert.match(enrollment?.detail ?? "", /write_config/);
+    assert.equal(
+      readCalls(fixture.callsPath).filter((call) => call === "repo list --json")
+        .length,
+      1,
+    );
   } finally {
     fixture.cleanup();
   }
@@ -481,7 +611,11 @@ test("project add converges after Orca registration partially succeeds", () => {
     });
     assert.equal(second.ok, true);
     assert.equal(second.status, "created");
-    assert.equal(loadConfig(fixture.configPath).repositories[0]?.orcaRepoId, "orca-repo-1");
+    assert.deepEqual(loadConfig(fixture.configPath).repositories[0], {
+      github: "Acme/Widget",
+      baseRef: "origin/main",
+      defaultBranch: "main",
+    });
   } finally {
     fixture.cleanup();
   }
@@ -625,6 +759,67 @@ test("CLI exposes project add dry-run", () => {
   }
 });
 
+test("CLI exposes full machine setup dry-run without mutation", () => {
+  const fixture = createFixture();
+  try {
+    const before = readFileSync(fixture.configPath, "utf8");
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli.ts",
+        "setup",
+        "--config",
+        fixture.configPath,
+        "--repo",
+        "Acme/Widget",
+        "--path",
+        fixture.repoPath,
+        "--dry-run",
+      ],
+      { encoding: "utf8", env: process.env },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /PLAN: would register/);
+    assert.match(result.stdout, /PLAN: project Acme\/Widget enrollment planned/);
+    assert.equal(readFileSync(fixture.configPath, "utf8"), before);
+    assert.equal(existsSync(join(fixture.dir, "harness.sqlite")), false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("CLI labels setup discovery failures as failures", () => {
+  const fixture = createFixture();
+  try {
+    writeFileSync(fixture.statePath, JSON.stringify({ malformed: true }));
+    const result = spawnSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "src/cli.ts",
+        "setup",
+        "--config",
+        fixture.configPath,
+        "--repo",
+        "Acme/Widget",
+        "--path",
+        fixture.repoPath,
+        "--dry-run",
+      ],
+      { encoding: "utf8", env: process.env },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /^FAIL: invalid Orca repo list response/m);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 function createFixture(): {
   dir: string;
   repoPath: string;
@@ -655,7 +850,7 @@ fs.appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify(args) + "\\n");
 if (args[0] === "repo" && args[1] === "list") {
   console.log(JSON.stringify(state.malformed
     ? { ok: true, result: { unexpected: [] } }
-    : { ok: true, result: { repos: state.repo ? [state.repo] : [] } }));
+    : { ok: true, result: { repos: state.repos || (state.repo ? [state.repo] : []) } }));
 } else if (args[0] === "repo" && args[1] === "add") {
   state.repo = {
     id: "orca-repo-1",
