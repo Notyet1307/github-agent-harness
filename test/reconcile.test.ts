@@ -357,6 +357,57 @@ test("blocked malformed audit stays blocked without completed provenance", () =>
   assert.equal(action.kind, "blocked");
 });
 
+test("validation-only rework can explicitly request a fresh audit of the same SHA", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-rework",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error: "rework produced no commits after audited HEAD",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      implementTaskStatus: "completed",
+      baseIsAncestor: true,
+      hasCommitsSinceBase: true,
+      worktreeExists: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_validation_only_rework");
+  }
+});
+
+test("validation-only rework stays blocked if HEAD changed", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-rework",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error: "rework produced no commits after audited HEAD",
+    }),
+    {
+      auditArtifactStatus: "current",
+      implementTaskStatus: "completed",
+      baseIsAncestor: true,
+      hasCommitsSinceBase: true,
+      trackedClean: true,
+      currentHeadSha: "changed-head",
+    },
+  );
+
+  assert.equal(action.kind, "blocked");
+});
+
 test("blocked audit wait resumes when completed evidence is ready", () => {
   const a = reconcileJob(
     job({

@@ -18,6 +18,7 @@ import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   classifyRecoverExecution,
   reconcileJob,
+  REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
   type RecoverAction,
   type ReconcileHints,
 } from "./reconcile.js";
@@ -180,6 +181,43 @@ export function runRecoveryCycle(options: {
           }
         }
       }
+      if (
+        !recoveryError &&
+        action.recovery === "retry_validation_only_rework" &&
+        job.worktree_path &&
+        job.base_sha &&
+        head
+      ) {
+        if (!job.implementer_task_id) {
+          recoveryError =
+            "cannot re-audit validation-only rework without the completed rework task";
+        } else if (hints.implementTaskStatus?.toLowerCase() !== "completed") {
+          recoveryError =
+            "cannot re-audit validation-only rework before the rework task completes";
+        } else if (
+          job.last_error !== REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR ||
+          job.audit_round <= 0 ||
+          job.audit_head_sha !== head ||
+          job.head_sha !== head
+        ) {
+          recoveryError =
+            "cannot re-audit validation-only rework without same-HEAD provenance";
+        } else {
+          const artifact = inspectAuditArtifact(
+            join(job.worktree_path, ".harness", "audit-result.json"),
+            job.base_sha,
+            head,
+          );
+          const dirty = trackedDirty(job.worktree_path);
+          if (dirty) {
+            recoveryError =
+              `cannot re-audit validation-only rework with tracked changes:\n${dirty}`;
+          } else if (artifact.status !== "current") {
+            recoveryError =
+              `cannot re-audit validation-only rework after artifact changed to ${artifact.status}`;
+          }
+        }
+      }
       if (recoveryError) {
         ledger.updateJob(job.id, {
           state: "blocked",
@@ -191,9 +229,15 @@ export function runRecoveryCycle(options: {
           message: recoveryError,
         };
       }
-      if (action.recovery === "retry_malformed_result") {
+      if (
+        action.recovery === "retry_malformed_result" ||
+        action.recovery === "retry_validation_only_rework"
+      ) {
         ledger.updateJob(job.id, {
-          state: "auditing",
+          state:
+            action.recovery === "retry_validation_only_rework"
+              ? "awaiting_audit"
+              : "auditing",
           auditor_terminal_handle: null,
           auditor_task_id: null,
           auditor_dispatch_id: null,
