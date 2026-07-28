@@ -33,10 +33,9 @@ export type ProjectSnapshot = {
   orcaRepoId: string;
 };
 
-export type MergePolicy = {
-  mode: "wait";
-  autoMerge: false;
-};
+export type MergePolicy =
+  | { mode: "wait"; autoMerge: false }
+  | { mode: "auto"; autoMerge: true };
 
 /** Stable role in the pipeline — not a product brand. */
 export type AgentRole = "implementer" | "auditor";

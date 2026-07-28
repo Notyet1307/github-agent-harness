@@ -96,7 +96,7 @@ export type WatchOptions = {
 
 /**
  * Continuous loop: reconcile → ensure* resume → or claim next → sleep.
- * Never auto-merges. Blocked jobs do not free the slot.
+ * Auto mode requests GitHub auto-merge; blocked jobs do not free the slot.
  */
 export function watch(options: WatchOptions = {}): {
   ok: boolean;

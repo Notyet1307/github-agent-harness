@@ -17,7 +17,9 @@ export type PullRequestView = {
     status?: string;
   }>;
   headRefName?: string;
+  headRefOid?: string;
   baseRefName?: string;
+  autoMergeRequest?: { enabledAt?: string | null } | null;
 };
 
 type GhIssueConnection =
@@ -261,7 +263,7 @@ export function viewPullRequest(
     "--repo",
     repo.github,
     "--json",
-    "number,url,title,state,mergedAt,mergeStateStatus,reviewDecision,statusCheckRollup,headRefName,baseRefName",
+    "number,url,title,state,mergedAt,mergeStateStatus,reviewDecision,statusCheckRollup,headRefName,headRefOid,baseRefName,autoMergeRequest",
   ]);
   if (!result.ok) {
     return {
@@ -276,6 +278,75 @@ export function viewPullRequest(
     return {
       ok: false,
       error: `failed to parse gh pr view: ${(err as Error).message}`,
+    };
+  }
+}
+
+export function enablePullRequestAutoMerge(
+  repo: RepoConfig,
+  number: number,
+): { ok: boolean; error?: string } {
+  const result = execFile(
+    "gh",
+    ["pr", "merge", String(number), "--repo", repo.github, "--auto"],
+    { timeoutMs: 120_000 },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.stderr.trim() ||
+        result.error ||
+        result.stdout.trim() ||
+        "gh pr merge --auto failed",
+    };
+  }
+  return { ok: true };
+}
+
+export function branchHasRequiredStatusChecks(repo: RepoConfig): {
+  ok: boolean;
+  configured?: boolean;
+  error?: string;
+} {
+  const branch = encodeURIComponent(repo.defaultBranch);
+  const result = execFile(
+    "gh",
+    ["api", `repos/${repo.github}/rules/branches/${branch}`],
+    { timeoutMs: 60_000 },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.stderr.trim() ||
+        result.error ||
+        result.stdout.trim() ||
+        "failed to inspect branch rules",
+    };
+  }
+  try {
+    const rules = JSON.parse(result.stdout) as unknown;
+    if (!Array.isArray(rules)) {
+      return { ok: false, error: "invalid GitHub branch rules response" };
+    }
+    const configured = rules.some((rule) => {
+      if (!rule || typeof rule !== "object") return false;
+      const candidate = rule as {
+        type?: unknown;
+        parameters?: { required_status_checks?: unknown };
+      };
+      return (
+        candidate.type === "required_status_checks" &&
+        Array.isArray(candidate.parameters?.required_status_checks) &&
+        candidate.parameters.required_status_checks.length > 0
+      );
+    });
+    return { ok: true, configured };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `failed to parse GitHub branch rules: ${(err as Error).message}`,
     };
   }
 }

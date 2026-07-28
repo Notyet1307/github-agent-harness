@@ -8,7 +8,12 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isMap, isSeq, parse as parseYaml, parseDocument } from "yaml";
-import type { AgentProfile, HarnessConfig, ProjectConfig } from "./types.js";
+import type {
+  AgentProfile,
+  HarnessConfig,
+  MergePolicy,
+  ProjectConfig,
+} from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const HARNESS_ROOT = resolve(here, "..");
@@ -129,7 +134,7 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   data.maxAuditRounds = data.maxAuditRounds ?? 3;
   data.maxConcurrentTotal = data.maxConcurrentTotal ?? 1;
   data.pollIntervalSeconds = data.pollIntervalSeconds ?? 120;
-  data.mergePolicy = data.mergePolicy ?? { mode: "wait", autoMerge: false };
+  data.mergePolicy = normalizeMergePolicy(data.mergePolicy);
 
   data.agentProfiles = normalizeProfiles(data.agentProfiles);
   data.activeProfiles = data.activeProfiles ?? {
@@ -163,6 +168,23 @@ function normalizeRepo(repo: ProjectConfig): ProjectConfig {
     baseRef: repo.baseRef,
     defaultBranch: repo.defaultBranch || "main",
   };
+}
+
+function normalizeMergePolicy(raw: unknown): MergePolicy {
+  if (raw === undefined) return { mode: "wait", autoMerge: false };
+  if (!raw || typeof raw !== "object") {
+    throw new Error("mergePolicy must be { mode: wait, autoMerge: false } or { mode: auto, autoMerge: true }");
+  }
+  const policy = raw as { mode?: unknown; autoMerge?: unknown };
+  if (policy.mode === "wait" && policy.autoMerge === false) {
+    return { mode: "wait", autoMerge: false };
+  }
+  if (policy.mode === "auto" && policy.autoMerge === true) {
+    return { mode: "auto", autoMerge: true };
+  }
+  throw new Error(
+    "mergePolicy must be { mode: wait, autoMerge: false } or { mode: auto, autoMerge: true }",
+  );
 }
 
 function normalizeProfiles(

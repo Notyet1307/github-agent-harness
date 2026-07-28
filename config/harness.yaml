@@ -9,6 +9,8 @@ implementTimeoutMinutes: 45
 auditTimeoutMinutes: 45
 
 mergePolicy:
+  # Switch both fields only after the target branch has required CI checks and
+  # the GitHub repository has Allow auto-merge enabled.
   mode: wait
   autoMerge: false
 

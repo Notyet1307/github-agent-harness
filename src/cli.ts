@@ -44,7 +44,7 @@ Pipeline (V1):
   Picker → Claim → Worktree → Implement → Audit → Publish PR → Wait merge
 
 M2–M5: one-shot commands
-M6 watch: poll loop — resume active job, or claim next; never auto-merge
+M6 watch: poll loop — resume active job, request GitHub auto-merge in auto mode, or claim next
 `;
 }
 
