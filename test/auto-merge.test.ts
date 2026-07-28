@@ -224,6 +224,7 @@ test("auto mode requests GitHub auto-merge for the audited PR head", (t) => {
           "--auto",
           "--match-head-commit",
           "b".repeat(40),
+          "--merge",
         ],
       ],
     );

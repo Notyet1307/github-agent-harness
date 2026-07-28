@@ -75,6 +75,27 @@ test("auditor dispatch requires the controller-owned user-scope reviewer", () =>
   assert.doesNotMatch(spec, /confirmProjectAgents/);
 });
 
+test("auditor validation satisfies documented service prerequisites first", () => {
+  const spec = renderAuditorSpec({
+    repo: "owner/repo",
+    issueNumber: 7,
+    issueUrl: "https://example.test/issues/7",
+    baseSha: "base-sha",
+    headSha: "head-sha",
+    branch: "issue-7",
+    worktreePath: "/tmp/issue-7",
+    profileId: "pi-reviewer",
+    orcaAgent: "pi",
+    invokeHint: "Invoke the audit skill.",
+    auditRound: 1,
+    resultPath: "/tmp/issue-7/.harness/audit-result.json",
+  });
+
+  assert.match(spec, /documented service prerequisites/i);
+  assert.match(spec, /unstarted documented prerequisite/i);
+  assert.match(spec, /current worktree/i);
+});
+
 test("auditor contract requires finding objects instead of bare strings", () => {
   const spec = renderAuditorSpec({
     repo: "owner/repo",

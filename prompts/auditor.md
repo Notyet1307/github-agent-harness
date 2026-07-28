@@ -22,7 +22,7 @@ You must not implement features. You must not act as the publisher.
 3. {{invokeHint}}
    Fixed point argument: `{{baseSha}}`
 4. Run Standards and Spec axes in **isolated parallel subagents** using only `harness-reviewer` with `agentScope: user` and fresh context. Never use or fall back to a project agent.
-5. Run approved validation (`npm test`, and lint/typecheck/build if defined). Record at least one actual command; if the repo exposes no validation script, use `git diff --check {{baseSha}}...HEAD`.
+5. Run approved validation (`npm test`, and lint/typecheck/build if defined). First inspect the validation script and repository docs for documented service prerequisites. If local services are documented prerequisites, start the minimal prerequisite in the current worktree (scope Docker Compose to that worktree and do not alter another worktree's stack) before running the test. An unstarted documented prerequisite, such as connection refused, is not a product validation failure. Record at least one actual command; if the repo exposes no validation script, use `git diff --check {{baseSha}}...HEAD`.
 6. Write the machine-readable audit JSON to `{{resultPath}}` exactly once.
 7. Do **not** modify tracked product source files. Creating `{{resultPath}}` / `.harness/` is allowed.
 8. Do not commit, push, create a PR, mutate labels, or merge.

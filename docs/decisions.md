@@ -158,7 +158,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Decision | Choice | Why |
 |---|---|---|
 | Default policy | `wait` | Existing repositories retain human merge until explicitly opted in |
-| Auto action | Invoke `gh pr merge --auto --match-head-commit`, never an explicit direct-merge API | Reuse GitHub's native CI/review gate and SHA check instead of re-implementing them in Harness |
+| Auto action | Invoke `gh pr merge --auto --match-head-commit --merge`, never an explicit direct-merge API | Reuse GitHub's native CI/review gate and SHA check; `--merge` makes the native CLI non-interactive |
 | Preconditions | Applied branch rule has required status checks; PR head exactly matches the audited head; GitHub reports `CLEAN` | No green-by-absence inference and no merge of a post-audit commit |
 | Request timing | Invoke `--auto --match-head-commit` only at `CLEAN` | The GitHub CLI may complete the matched merge immediately; do not leave a persistent request while CI or review is unresolved |
 | Unsafe PR state | Disable an existing auto-merge request on CI failure, requested changes, or a changed head | Retain the job for explicit recovery; never merge a post-audit commit |

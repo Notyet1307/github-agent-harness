@@ -1151,6 +1151,45 @@ test("recover explicitly redispatches a malformed completed audit", (t) => {
   );
 });
 
+test("recover explicitly re-audits validation-only rework without a new commit", (t) => {
+  const fixture = createAuditFixture(actionableAuditFailure, "audit-retry");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error: "rework produced no commits after audited HEAD",
+  });
+  ledger.close();
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.ok, true, recovered.message);
+  assert.equal(recovered.action.kind, "audit_once");
+  if (recovered.action.kind === "audit_once") {
+    assert.equal(recovered.action.recovery, "retry_validation_only_rework");
+  }
+  assert.equal(git(fixture.worktree, "rev-parse", "HEAD"), fixture.headSha);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 2);
+  assert.equal(verified.getJob("job-audit")?.auditor_task_id, "task-audit-new");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) =>
+        args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
 test("malformed audit recovery stops when the artifact changes after planning", (t) => {
   const fixture = createAuditFixture(
     (baseSha, headSha) =>

@@ -3,6 +3,8 @@ import type { Job, JobState } from "./types.js";
 
 export const IMPLEMENT_NO_COMMITS_ERROR =
   "implement finished but no commits since base";
+export const REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR =
+  "rework produced no commits after audited HEAD";
 
 /**
  * Pure recovery routing for M5.
@@ -17,7 +19,9 @@ export type RecoverAction =
   | {
       kind: "audit_once";
       reason: string;
-      recovery?: "retry_malformed_result";
+      recovery?:
+        | "retry_malformed_result"
+        | "retry_validation_only_rework";
     }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
@@ -185,6 +189,26 @@ export function reconcileJob(
           reason:
             "completed audit produced a malformed result; explicit recovery may dispatch a fresh auditor",
           recovery: "retry_malformed_result",
+        };
+      }
+      if (
+        job.implementer_task_id &&
+        job.audit_round > 0 &&
+        job.last_error === REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        job.head_sha === hints.currentHeadSha &&
+        hints.worktreeExists === true &&
+        hints.hasCommitsSinceBase === true &&
+        hints.auditArtifactStatus === "current" &&
+        hints.implementTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "completed validation-only rework may explicitly dispatch a fresh auditor for the same HEAD",
+          recovery: "retry_validation_only_rework",
         };
       }
       if (

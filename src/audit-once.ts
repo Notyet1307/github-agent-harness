@@ -34,6 +34,7 @@ import {
   type DispatchWait,
 } from "./orca-runtime.js";
 import { renderAuditorSpec, renderReworkSpec } from "./prompts.js";
+import { REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR } from "./reconcile.js";
 import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type AuditOnceResult = {
@@ -919,7 +920,7 @@ function runReworkPhase(
     if (headSha === auditHeadSha) {
       return {
         ok: false,
-        error: "rework produced no commits after audited HEAD",
+        error: REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
       };
     }
     const ancestry = checkAncestor(
