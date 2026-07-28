@@ -153,6 +153,16 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Environment gate | User LaunchAgent with pinned Node/repo/config paths, explicit `HOME`/stable `PATH`, logs, `doctor`, single-instance, and uninstall checks | launchd does not inherit the interactive shell environment |
 | Shutdown gate | Verify or replace the synchronous poll sleep before relying on graceful `bootout` | `SIGTERM` handling can currently wait up to one poll interval while `spawnSync` blocks |
 
+## 2026-07-28 — M7 GitHub auto-merge
+
+| Decision | Choice | Why |
+|---|---|---|
+| Default policy | `wait` | Existing repositories retain human merge until explicitly opted in |
+| Auto action | Request GitHub Auto-merge, never direct merge | Reuse GitHub's native CI/review gate instead of re-implementing it in Harness |
+| Preconditions | Applied branch rule has required status checks; PR head exactly matches the audited head | No green-by-absence inference and no merge of a post-audit commit |
+| Missing rule/head mismatch | Block and retain the single-job slot | Fail closed; never skip to another issue |
+| Auto-merge request error | Record error and retain `awaiting_merge` | Repository settings or temporary GitHub errors can be corrected without losing the PR |
+
 ## 2026-07-22 — dispatch acceptance probe
 
 | Decision | Choice | Why |

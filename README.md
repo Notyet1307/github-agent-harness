@@ -6,7 +6,7 @@ A single-task coding-agent controller with a merge gate.
 
 ```text
 Picker → Ledger Claim → Orca Worktree → Pi /skill:implement
-  → Pi dual-axis audit → Gate → PR → Human merge → Next
+  → Pi dual-axis audit → Gate → PR → GitHub or human merge → Next
 ```
 
 ## Overview
@@ -14,9 +14,10 @@ Picker → Ledger Claim → Orca Worktree → Pi /skill:implement
 The harness selects work from GitHub issues, uses a SQLite ledger to allow only
 one in-flight job globally, and asks Orca to create an isolated worktree and
 dispatch the Pi implementer and Pi auditor. The controller pushes a branch and
-opens a PR only after an independent audit passes. The harness never merges;
-an external human action performs the merge after all applicable branch
-protection requirements are satisfied.
+opens a PR only after an independent audit passes. By default, a human merges
+after all applicable branch-protection requirements are satisfied. Opt-in auto
+mode asks GitHub to auto-merge only the audited PR head; GitHub branch rules
+remain the CI/review authority.
 
 | Milestone | Command | Status |
 |---|---|---|
@@ -25,9 +26,9 @@ protection requirements are satisfied.
 | M1 | `pnpm harness pick --dry-run` | Implemented: read-only picker preview |
 | M2 | `pnpm harness run-once` | Implemented: stops after implementation commits |
 | M3 | `pnpm harness audit-once` | Implemented: Pi two-axis audit and rework gate, no PR |
-| M4 | `pnpm harness publish-once` / `wait-merge` | Implemented: create PR and wait for human merge |
+| M4 | `pnpm harness publish-once` / `wait-merge` | Implemented: create PR and wait, or request GitHub auto-merge |
 | M5 | `pnpm harness recover` | Implemented: reconcile and resume one ensure step |
-| M6 | `pnpm harness watch` | Implemented: foreground polling controller, never auto-merges |
+| M6 | `pnpm harness watch` | Implemented: foreground polling controller |
 | Deployment | macOS `launchd` | Deferred: this repository has no plist or service commands |
 
 ## New machine onboarding
@@ -291,9 +292,25 @@ pnpm harness status
 ```
 
 The usual progression is claim and implement → audit/rework → push and create a
-PR → wait for a human merge. Harness never merges automatically. After the PR
-is merged, run `work --once` again or wait for the next `watch` tick so the
-controller records the merge and frees the single-job slot.
+PR → wait for a human merge or GitHub auto-merge. After the PR is merged, run
+`work --once` again or wait for the next `watch` tick so the controller records
+the merge and frees the single-job slot.
+
+### Merge policy
+
+`wait` is the default. `auto` is opt-in and never performs a direct merge:
+
+```yaml
+mergePolicy:
+  mode: auto
+  autoMerge: true
+```
+
+Before enabling it, configure GitHub's **Allow auto-merge** and a branch rule
+with one or more required status checks. On every request, Harness verifies
+that rule and that the PR head exactly matches its audited head. A missing CI
+rule or head mismatch blocks the job; CI failures, requested changes, and
+GitHub auto-merge errors keep the slot occupied.
 
 Run only one controller at a time. Do not start overlapping `work`/`watch`
 processes or run Harness concurrently on two machines.
@@ -309,7 +326,7 @@ pipeline.
 | `pnpm harness run-once` | Claim an issue, create or reuse the worktree, and finish implementation; no push or PR |
 | `pnpm harness audit-once` | Run the independent Pi audit and controlled rework when needed; no PR |
 | `pnpm harness publish-once` | Push and create or reuse the PR after audit passes, then stop at `awaiting_merge` |
-| `pnpm harness wait-merge --timeout-minutes 60` | Poll GitHub merge state only; never perform the merge |
+| `pnpm harness wait-merge --timeout-minutes 60` | Poll GitHub; in auto mode request GitHub auto-merge, never direct-merge |
 | `pnpm harness recover --dry-run` | Show the ensure step that should resume after a crash, without changing state |
 | `pnpm harness recover --execute` | Execute the reconciled recovery step |
 | `pnpm harness status` | Show the active job, recent jobs, and Orca state |
@@ -352,11 +369,11 @@ Each `watch` tick:
    later tick performs the audit after a fresh inspection.
 4. Stop rather than execute an explicit recovery action. The operator must use
    `recover --dry-run` and then `recover --execute`.
-5. After a human merges the PR, the next poll records `mergedAt` and frees the
+5. After GitHub or a human merges the PR, the next poll records `mergedAt` and frees the
    single ledger slot, while retaining the Orca worktree for inspection.
 6. A `blocked` job keeps the slot. CI failures or requested changes do not
    automatically trigger rework while waiting for merge.
-7. Never auto-merge and never auto-delete completed worktrees.
+7. Auto mode requests GitHub auto-merge only; it never direct-merges or deletes completed worktrees.
 
 ### launchd service (deferred)
 
@@ -376,8 +393,8 @@ Before launchd is enabled, the production repository must at minimum:
   delayed by up to one poll interval.
 - Never run alongside a manually started foreground watcher, never store
   tokens in the plist, and define log rotation.
-- Explicitly inherit the full `watch` behavior above: it will auto-claim new
-  issues, but will not auto-merge or delete worktrees.
+- Explicitly inherit the full `watch` behavior above, including its configured
+  GitHub auto-merge policy and no worktree deletion.
 
 ## Recovery and reliability
 
@@ -395,7 +412,7 @@ pnpm harness recover --execute
 | `claimed` / `worktree_ready` / `implementing` | `run-once`: reuse the worktree; verify and finalize existing commits without re-waiting |
 | `awaiting_audit` / `auditing` / `reworking` | `audit-once`: reuse only same-round, exact-SHA results with complete provenance |
 | `audit_passed` / `publishing` | `publish-once`: find and reuse the PR by head |
-| `awaiting_merge` | `wait-merge`: poll and record the result only |
+| `awaiting_merge` | `wait-merge`: poll, request GitHub auto-merge in auto mode, and record the result |
 | Recoverable blocked audit | `audit-once`: re-enter the normal gate |
 | Completed malformed audit | Explicit `recover --execute`: discard the malformed artifact and dispatch a fresh auditor for the same round |
 | Ended implementation with no commits | Redispatch in the same worktree only through explicit `recover --execute` |
@@ -459,7 +476,7 @@ handles.
 5. Do not claim the next issue before the PR is merged.
 6. Closed-unmerged, audit-exhausted, or revoked issues must block; never skip
    ahead.
-7. Never auto-merge and never auto-delete completed worktrees.
+7. Never direct-merge or auto-delete completed worktrees; auto mode may only request GitHub auto-merge.
 
 ## Configuration, state, and decisions
 

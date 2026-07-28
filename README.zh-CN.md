@@ -6,15 +6,16 @@
 
 ```text
 Picker → Ledger Claim → Orca Worktree → Pi /skill:implement
-  → Pi dual-axis audit → Gate → PR → Human merge → Next
+  → Pi dual-axis audit → Gate → PR → GitHub 或人工 merge → Next
 ```
 
 ## 概览
 
 Harness 通过 GitHub issue 选取任务，用 SQLite ledger 保证全局只有一个进行中的
 job，通过 Orca 创建隔离 worktree 并派发 Pi implementer 和 Pi auditor。只有独立
-audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执行 merge；
-合并由外部人工动作触发，并且必须满足适用的 branch protection 规则。
+audit 通过后，controller 才会 push 分支并创建 PR。默认由人工在满足适用的 branch
+protection 后合并；可选 auto 模式只向 GitHub 请求合并已审计的 PR HEAD，CI/review
+门槛仍以 GitHub branch rule 为准。
 
 | 阶段 | 命令 | 状态 |
 |---|---|---|
@@ -23,9 +24,9 @@ audit 通过后，controller 才会 push 分支并创建 PR。Harness 永不执�
 | M1 | `pnpm harness pick --dry-run` | 已实现：只读选取预览 |
 | M2 | `pnpm harness run-once` | 已实现：停在实现提交完成 |
 | M3 | `pnpm harness audit-once` | 已实现：Pi 双轴 audit 与 rework gate，不创建 PR |
-| M4 | `pnpm harness publish-once` / `wait-merge` | 已实现：创建 PR 并等待人工合并 |
+| M4 | `pnpm harness publish-once` / `wait-merge` | 已实现：创建 PR 并等待，或请求 GitHub 自动合并 |
 | M5 | `pnpm harness recover` | 已实现：对账并恢复一个 ensure step |
-| M6 | `pnpm harness watch` | 已实现：前台轮询控制器，不自动合并 |
+| M6 | `pnpm harness watch` | 已实现：前台轮询控制器 |
 | 部署 | macOS `launchd` | 延后：本仓库没有 plist 或服务命令 |
 
 ## 新电脑接入
@@ -264,9 +265,24 @@ pnpm harness work --once
 pnpm harness status
 ```
 
-典型状态推进为：领取并实现 → audit/rework → push 并创建 PR → 等待人工 merge。
-Harness 永不自动 merge。PR 人工合并后，再运行一次 `work --once` 或等待下一个
-`watch` tick，controller 会记录合并并释放单任务槽。
+典型状态推进为：领取并实现 → audit/rework → push 并创建 PR → 等待人工或 GitHub
+自动 merge。PR 合并后，再运行一次 `work --once` 或等待下一个 `watch` tick，
+controller 会记录合并并释放单任务槽。
+
+### 合并策略
+
+默认是 `wait`。`auto` 必须显式启用，且不执行直接 merge：
+
+```yaml
+mergePolicy:
+  mode: auto
+  autoMerge: true
+```
+
+启用前，先在 GitHub 打开 **Allow auto-merge**，并为目标分支配置至少一个 required
+status check。每次请求前 Harness 都会核验该规则和 PR HEAD 是否精确等于已审计 HEAD。
+缺少 CI 规则或 HEAD 不一致会阻塞 job；CI 失败、requested changes 或 GitHub 自动合并
+请求失败都会继续占用 slot。
 
 同一时间只能运行一个 controller。不要同时启动多个 `work`/`watch` 进程，也不要在
 两台电脑上同时运行 Harness。
@@ -281,7 +297,7 @@ Harness 永不自动 merge。PR 人工合并后，再运行一次 `work --once` 
 | `pnpm harness run-once` | 领取 issue、创建或复用 worktree、完成实现；不 push、不建 PR |
 | `pnpm harness audit-once` | 运行独立 Pi audit，必要时执行受控 rework；不建 PR |
 | `pnpm harness publish-once` | audit 通过后 push 并创建或复用 PR，停在 `awaiting_merge` |
-| `pnpm harness wait-merge --timeout-minutes 60` | 只监控 GitHub 合并状态，绝不执行 merge |
+| `pnpm harness wait-merge --timeout-minutes 60` | 轮询 GitHub；auto 模式请求 GitHub 自动合并，绝不直接 merge |
 | `pnpm harness recover --dry-run` | 只读显示崩溃后应恢复的 ensure step |
 | `pnpm harness recover --execute` | 执行已核对的恢复步骤 |
 | `pnpm harness status` | 显示 active job、最近 job 与 Orca 状态 |
@@ -322,11 +338,11 @@ pnpm harness watch --max-cycles 10 --poll-seconds 30
    才执行 audit，不在同一 tick 串联。
 4. 遇到显式恢复动作时停止；操作员必须先运行 `recover --dry-run`，再运行
    `recover --execute`。
-5. PR 被人工合并后，下一次 poll 记录 `mergedAt` 并释放 ledger 单槽，但保留 Orca
+5. PR 被 GitHub 或人工合并后，下一次 poll 记录 `mergedAt` 并释放 ledger 单槽，但保留 Orca
    worktree 供检查。
 6. `blocked` job 继续占槽；CI 失败或 requested changes 不会在等待合并阶段自动
    触发 rework。
-7. 永不自动 merge，也不自动删除已完成 worktree。
+7. auto 模式只请求 GitHub 自动合并；绝不直接 merge，也不自动删除已完成 worktree。
 
 ### launchd 常驻服务（延后）
 
@@ -343,7 +359,7 @@ pnpm harness watch --max-cycles 10 --poll-seconds 30
   当前信号处理可能延迟到最长一个 poll interval。
 - 禁止与手工启动的 foreground watcher 并跑，不在 plist 中保存 token，并为日志
   设置轮转策略。
-- 明确继承上面的完整 `watch` 行为：会自动领取新 issue，但不会自动 merge 或删除
+- 明确继承上面的完整 `watch` 行为，包括已配置的 GitHub 自动合并策略，且不删除
   worktree。
 
 ## 恢复与可靠性
@@ -361,7 +377,7 @@ pnpm harness recover --execute
 | `claimed` / `worktree_ready` / `implementing` | `run-once`：复用 worktree；已有提交时核验后完成，不重复等待 |
 | `awaiting_audit` / `auditing` / `reworking` | `audit-once`：只复用同轮、同 SHA、来源完整的结果 |
 | `audit_passed` / `publishing` | `publish-once`：按 head 查找并复用 PR |
-| `awaiting_merge` | `wait-merge`：只轮询并记录结果 |
+| `awaiting_merge` | `wait-merge`：轮询；auto 模式请求 GitHub 自动合并并记录结果 |
 | 可恢复的 blocked audit | `audit-once`：重新经过正常 gate |
 | 无提交的 ended implementation | 仅显式 `recover --execute` 才在原 worktree 重派 |
 | 其他 `blocked` | 不继续，持续占槽 |
@@ -416,7 +432,7 @@ Implementer 和 auditor 当前仍共享父 Pi provider/model 与
 4. 独立 Pi audit 通过前不得创建 PR。
 5. PR merge 前不得领取下一项。
 6. Closed-unmerged、audit exhausted 或 issue revoked 必须进入 blocked，不能跳过。
-7. 永不自动 merge，永不自动删除完成的 worktree。
+7. 不得直接 merge 或自动删除完成的 worktree；auto 模式只能请求 GitHub 自动合并。
 
 ## 配置、状态与决策
 

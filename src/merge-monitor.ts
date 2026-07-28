@@ -1,6 +1,11 @@
 import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { execFile } from "./exec.js";
-import { viewPullRequest, type PullRequestView } from "./github.js";
+import {
+  branchHasRequiredStatusChecks,
+  enablePullRequestAutoMerge,
+  viewPullRequest,
+  type PullRequestView,
+} from "./github.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
@@ -21,8 +26,8 @@ type MergePollResult =
 
 /**
  * Poll GitHub until merged, closed-unmerged, or timeout.
- * Does not auto-merge. On CI failure / changes requested, records last_error
- * and keeps awaiting_merge (human or later rework command).
+ * Auto mode asks GitHub to merge only the audited PR head; GitHub's branch
+ * rules remain the authority for CI/review requirements.
  */
 export function waitMerge(options: {
   configPath?: string;
@@ -244,17 +249,119 @@ function pollMergeOnce(
       `harness: PR needs work — ${decision.reason}`.slice(0, 180),
       "in-review",
     );
-  } else {
-    const updated = ledger.updateJobIf(job.id, job.revision, {
-      pr_number: viewed.pr.number,
-      pr_url: viewed.pr.url,
-      last_error: null,
-    });
-    if (!updated) return jobChanged(job.id);
-    job = updated;
+    return { done: false, job };
   }
 
+  if (config.mergePolicy.mode === "auto") {
+    if (viewed.pr.baseRefName !== repo.defaultBranch) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        `PR base ${viewed.pr.baseRefName ?? "unknown"} differs from configured default branch ${repo.defaultBranch}`,
+      );
+    }
+    const branchRules = branchHasRequiredStatusChecks(repo);
+    if (!branchRules.ok) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        `cannot verify required status checks: ${branchRules.error ?? "unknown"}`,
+      );
+    }
+    if (!branchRules.configured) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        `auto merge requires branch-required status checks on ${repo.defaultBranch}`,
+      );
+    }
+    if (!job.head_sha || !viewed.pr.headRefOid) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        "cannot verify PR head against audited head",
+      );
+    }
+    if (job.head_sha !== viewed.pr.headRefOid) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        job,
+        viewed.pr,
+        `PR head ${viewed.pr.headRefOid} differs from audited head ${job.head_sha}`,
+      );
+    }
+    if (!viewed.pr.autoMergeRequest) {
+      const requested = enablePullRequestAutoMerge(
+        repo,
+        viewed.pr.number,
+        job.head_sha,
+      );
+      if (!requested.ok) {
+        const error = `GitHub auto-merge request failed: ${requested.error ?? "unknown"}`;
+        const updated = ledger.updateJobIf(job.id, job.revision, {
+          pr_number: viewed.pr.number,
+          pr_url: viewed.pr.url,
+          last_error: error,
+        });
+        if (!updated) return jobChanged(job.id);
+        log(error);
+        return { done: false, job: updated };
+      }
+      log(`requested GitHub auto-merge for PR #${viewed.pr.number}`);
+    }
+  }
+
+  const updated = ledger.updateJobIf(job.id, job.revision, {
+    pr_number: viewed.pr.number,
+    pr_url: viewed.pr.url,
+    last_error: null,
+  });
+  if (!updated) return jobChanged(job.id);
+  job = updated;
+
   return { done: false, job };
+}
+
+function blockAutoMerge(
+  ledger: Ledger,
+  orcaCli: string,
+  job: Job,
+  pr: PullRequestView,
+  error: string,
+): MergePollResult {
+  const updated = ledger.updateJobIf(job.id, job.revision, {
+    state: "blocked",
+    last_error: error,
+    pr_number: pr.number,
+    pr_url: pr.url,
+  });
+  if (!updated) return jobChanged(job.id);
+  if (updated.worktree_id) {
+    setWorktreeProgress(
+      orcaCli,
+      updated.worktree_id,
+      `harness: blocked — ${error}`.slice(0, 180),
+      "in-progress",
+    );
+  }
+  return {
+    done: true,
+    result: {
+      ok: false,
+      jobId: updated.id,
+      message: error,
+      details: pr,
+    },
+  };
 }
 
 function jobChanged(jobId: string): MergePollResult {
