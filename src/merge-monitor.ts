@@ -2,6 +2,7 @@ import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { execFile } from "./exec.js";
 import {
   branchHasRequiredStatusChecks,
+  disablePullRequestAutoMerge,
   enablePullRequestAutoMerge,
   viewPullRequest,
   type PullRequestView,
@@ -11,7 +12,7 @@ import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
 import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import { setWorktreeProgress } from "./orca-runtime.js";
-import type { Job, RuntimeHarnessConfig } from "./types.js";
+import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
 export type WaitMergeResult = {
   ok: boolean;
@@ -233,7 +234,76 @@ function pollMergeOnce(
     };
   }
 
+  if (config.mergePolicy.mode === "auto") {
+    if (viewed.pr.baseRefName !== repo.defaultBranch) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        repo,
+        job,
+        viewed.pr,
+        `PR base ${viewed.pr.baseRefName ?? "unknown"} differs from configured default branch ${repo.defaultBranch}`,
+        log,
+      );
+    }
+    const branchRules = branchHasRequiredStatusChecks(repo);
+    if (!branchRules.ok) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        repo,
+        job,
+        viewed.pr,
+        `cannot verify required status checks: ${branchRules.error ?? "unknown"}`,
+        log,
+      );
+    }
+    if (!branchRules.configured) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        repo,
+        job,
+        viewed.pr,
+        `auto merge requires branch-required status checks on ${repo.defaultBranch}`,
+        log,
+      );
+    }
+    if (!job.head_sha || !viewed.pr.headRefOid) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        repo,
+        job,
+        viewed.pr,
+        "cannot verify PR head against audited head",
+        log,
+      );
+    }
+    if (job.head_sha !== viewed.pr.headRefOid) {
+      return blockAutoMerge(
+        ledger,
+        orcaCli,
+        repo,
+        job,
+        viewed.pr,
+        `PR head ${viewed.pr.headRefOid} differs from audited head ${job.head_sha}`,
+        log,
+      );
+    }
+  }
+
   if (decision.kind === "needs_work") {
+    if (config.mergePolicy.mode === "auto") {
+      const cancellation = cancelAutoMergeIfRequested(
+        ledger,
+        job,
+        repo,
+        viewed.pr,
+        log,
+      );
+      if (cancellation) return cancellation;
+    }
     const updated = ledger.updateJobIf(job.id, job.revision, {
       last_error: decision.reason,
       pr_number: viewed.pr.number,
@@ -253,57 +323,43 @@ function pollMergeOnce(
   }
 
   if (config.mergePolicy.mode === "auto") {
-    if (viewed.pr.baseRefName !== repo.defaultBranch) {
-      return blockAutoMerge(
+    if (viewed.pr.mergeStateStatus !== "CLEAN") {
+      const cancellation = cancelAutoMergeIfRequested(
         ledger,
-        orcaCli,
         job,
+        repo,
         viewed.pr,
-        `PR base ${viewed.pr.baseRefName ?? "unknown"} differs from configured default branch ${repo.defaultBranch}`,
+        log,
       );
-    }
-    const branchRules = branchHasRequiredStatusChecks(repo);
-    if (!branchRules.ok) {
-      return blockAutoMerge(
-        ledger,
-        orcaCli,
-        job,
-        viewed.pr,
-        `cannot verify required status checks: ${branchRules.error ?? "unknown"}`,
+      if (cancellation) return cancellation;
+      log(
+        `waiting for GitHub merge state CLEAN (current ${viewed.pr.mergeStateStatus ?? "unknown"})`,
       );
-    }
-    if (!branchRules.configured) {
-      return blockAutoMerge(
-        ledger,
-        orcaCli,
-        job,
-        viewed.pr,
-        `auto merge requires branch-required status checks on ${repo.defaultBranch}`,
-      );
-    }
-    if (!job.head_sha || !viewed.pr.headRefOid) {
-      return blockAutoMerge(
-        ledger,
-        orcaCli,
-        job,
-        viewed.pr,
-        "cannot verify PR head against audited head",
-      );
-    }
-    if (job.head_sha !== viewed.pr.headRefOid) {
-      return blockAutoMerge(
-        ledger,
-        orcaCli,
-        job,
-        viewed.pr,
-        `PR head ${viewed.pr.headRefOid} differs from audited head ${job.head_sha}`,
-      );
+      const updated = ledger.updateJobIf(job.id, job.revision, {
+        pr_number: viewed.pr.number,
+        pr_url: viewed.pr.url,
+        last_error: null,
+      });
+      if (!updated) return jobChanged(job.id);
+      return { done: false, job: updated };
     }
     if (!viewed.pr.autoMergeRequest) {
+      const expectedHeadSha = job.head_sha;
+      if (!expectedHeadSha) {
+        return blockAutoMerge(
+          ledger,
+          orcaCli,
+          repo,
+          job,
+          viewed.pr,
+          "cannot verify PR head against audited head",
+          log,
+        );
+      }
       const requested = enablePullRequestAutoMerge(
         repo,
         viewed.pr.number,
-        job.head_sha,
+        expectedHeadSha,
       );
       if (!requested.ok) {
         const error = `GitHub auto-merge request failed: ${requested.error ?? "unknown"}`;
@@ -331,13 +387,45 @@ function pollMergeOnce(
   return { done: false, job };
 }
 
+function cancelAutoMergeIfRequested(
+  ledger: Ledger,
+  job: Job,
+  repo: RepoConfig,
+  pr: PullRequestView,
+  log: (message: string) => void,
+): MergePollResult | null {
+  if (!pr.autoMergeRequest) return null;
+  const disabled = disablePullRequestAutoMerge(repo, pr.number);
+  if (disabled.ok) {
+    log(`disabled GitHub auto-merge for PR #${pr.number}`);
+    return null;
+  }
+
+  const error = `GitHub auto-merge disable failed: ${disabled.error ?? "unknown"}`;
+  const updated = ledger.updateJobIf(job.id, job.revision, {
+    pr_number: pr.number,
+    pr_url: pr.url,
+    last_error: error,
+  });
+  if (!updated) return jobChanged(job.id);
+  log(error);
+  return {
+    done: true,
+    result: { ok: false, jobId: updated.id, message: error, details: pr },
+  };
+}
+
 function blockAutoMerge(
   ledger: Ledger,
   orcaCli: string,
+  repo: RepoConfig,
   job: Job,
   pr: PullRequestView,
   error: string,
+  log: (message: string) => void,
 ): MergePollResult {
+  const cancellation = cancelAutoMergeIfRequested(ledger, job, repo, pr, log);
+  if (cancellation) return cancellation;
   const updated = ledger.updateJobIf(job.id, job.revision, {
     state: "blocked",
     last_error: error,

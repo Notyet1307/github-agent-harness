@@ -30,8 +30,11 @@ function createFixture(
     prHead: string;
     baseRefName?: string;
     mergeExitCode?: number;
+    mergeStateStatus?: string;
     requiredChecks?: string[];
     autoMergeRequested?: boolean;
+    reviewDecision?: string | null;
+    statusCheckRollup?: Array<Record<string, string>>;
   },
 ): Fixture {
   const dir = mkdtempSync(join(tmpdir(), "harness-auto-merge-"));
@@ -63,9 +66,9 @@ if (args[0] === "pr" && args[1] === "view") {
     title: "Test PR",
     state: "OPEN",
     mergedAt: null,
-    mergeStateStatus: "PENDING",
-    reviewDecision: "APPROVED",
-    statusCheckRollup: [],
+    mergeStateStatus: ${JSON.stringify(options.mergeStateStatus ?? "CLEAN")},
+    reviewDecision: ${JSON.stringify(options.reviewDecision ?? "APPROVED")},
+    statusCheckRollup: ${JSON.stringify(options.statusCheckRollup ?? [])},
     headRefName: "agent/issue-1",
     headRefOid: ${JSON.stringify(options.prHead)},
     baseRefName: ${JSON.stringify(options.baseRefName ?? "main")},
@@ -229,6 +232,32 @@ test("auto mode requests GitHub auto-merge for the audited PR head", (t) => {
   }
 });
 
+test("auto mode waits for GitHub to report a clean merge state", (t) => {
+  const fixture = createFixture(t, {
+    prHead: "b".repeat(40),
+    mergeStateStatus: "PENDING",
+  });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${join(fixture.dir, "bin")}:${originalPath ?? ""}`;
+  try {
+    const result = waitMerge({
+      configPath: fixture.configPath,
+      ledgerPath: fixture.ledgerPath,
+      lockPath: fixture.lockPath,
+      timeoutMinutes: 0,
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.message, /still awaiting_merge/);
+    assert.equal(existsSync(fixture.mergeCallsPath), false);
+    const ledger = new Ledger(fixture.ledgerPath);
+    assert.equal(ledger.getJob("job-1")?.state, "awaiting_merge");
+    ledger.close();
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
 test("auto mode blocks a PR that targets a different base branch", (t) => {
   const fixture = createFixture(t, {
     prHead: "b".repeat(40),
@@ -281,7 +310,7 @@ test("auto mode blocks when the PR head differs from the audited head", (t) => {
   }
 });
 
-test("auto mode rechecks an already requested PR head", (t) => {
+test("auto mode disables an already requested PR when its head changes", (t) => {
   const fixture = createFixture(t, {
     prHead: "c".repeat(40),
     autoMergeRequested: true,
@@ -298,7 +327,91 @@ test("auto mode rechecks an already requested PR head", (t) => {
 
     assert.equal(result.ok, false);
     assert.match(result.message, /PR head .* differs from audited head/);
-    assert.equal(existsSync(fixture.mergeCallsPath), false);
+    assert.deepEqual(
+      readFileSync(fixture.mergeCallsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]),
+      [["pr", "merge", "1", "--repo", "owner/repo", "--disable-auto"]],
+    );
+    const ledger = new Ledger(fixture.ledgerPath);
+    assert.equal(ledger.getJob("job-1")?.state, "blocked");
+    ledger.close();
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("auto mode disables an already requested PR after changes are requested", (t) => {
+  const fixture = createFixture(t, {
+    prHead: "b".repeat(40),
+    autoMergeRequested: true,
+    reviewDecision: "CHANGES_REQUESTED",
+  });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${join(fixture.dir, "bin")}:${originalPath ?? ""}`;
+  try {
+    const result = waitMerge({
+      configPath: fixture.configPath,
+      ledgerPath: fixture.ledgerPath,
+      lockPath: fixture.lockPath,
+      timeoutMinutes: 0,
+    });
+
+    assert.equal(result.ok, true);
+    assert.match(result.message, /still awaiting_merge/);
+    assert.deepEqual(
+      readFileSync(fixture.mergeCallsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]),
+      [["pr", "merge", "1", "--repo", "owner/repo", "--disable-auto"]],
+    );
+    const ledger = new Ledger(fixture.ledgerPath);
+    assert.equal(ledger.getJob("job-1")?.state, "awaiting_merge");
+    assert.equal(
+      ledger.getJob("job-1")?.last_error,
+      "reviewDecision=CHANGES_REQUESTED",
+    );
+    ledger.close();
+  } finally {
+    process.env.PATH = originalPath;
+  }
+});
+
+test("auto mode disables an already requested PR when its changed head has failed CI", (t) => {
+  const fixture = createFixture(t, {
+    prHead: "c".repeat(40),
+    autoMergeRequested: true,
+    mergeStateStatus: "UNSTABLE",
+    statusCheckRollup: [{ name: "test", conclusion: "FAILURE" }],
+  });
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${join(fixture.dir, "bin")}:${originalPath ?? ""}`;
+  try {
+    const result = waitMerge({
+      configPath: fixture.configPath,
+      ledgerPath: fixture.ledgerPath,
+      lockPath: fixture.lockPath,
+      timeoutMinutes: 0,
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.message, /PR head .* differs from audited head/);
+    assert.deepEqual(
+      readFileSync(fixture.mergeCallsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]),
+      [["pr", "merge", "1", "--repo", "owner/repo", "--disable-auto"]],
+    );
+    const ledger = new Ledger(fixture.ledgerPath);
+    assert.equal(ledger.getJob("job-1")?.state, "blocked");
+    assert.match(
+      ledger.getJob("job-1")?.last_error ?? "",
+      /PR head .* differs from audited head/,
+    );
+    ledger.close();
   } finally {
     process.env.PATH = originalPath;
   }
