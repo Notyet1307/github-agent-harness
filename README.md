@@ -95,8 +95,11 @@ mergePolicy:
 ~~~
 
 Before each request, Harness verifies a required-check rule, the PR target
-branch, and that the PR head is exactly the audited commit. Missing rules or a
-changed head block the job instead of merging another commit.
+branch, and that the PR head is exactly the audited commit. It waits until
+GitHub reports the PR merge state as `CLEAN` before invoking the configured
+`gh pr merge --auto --match-head-commit` command.
+Missing rules or a changed head block the job instead of merging another
+commit.
 
 ## Use
 
@@ -132,8 +135,11 @@ In auto mode, Harness requests:
 gh pr merge --auto --match-head-commit <audited-sha>
 ~~~
 
-GitHub waits for its required checks. A failed check, requested changes, a
-closed PR, or an auto-merge error keeps the job visible for explicit recovery;
+Harness only invokes that command after GitHub reports the required checks as
+passing; GitHub CLI may then complete the merge immediately for the matched
+head. A failed check, requested changes, a changed PR head, a closed PR, or an
+auto-merge error keeps the job visible for explicit recovery; any existing
+auto-merge request is disabled when Harness observes an unsafe PR state.
 Harness does not auto-rework or jump to another issue.
 
 ### Recover safely

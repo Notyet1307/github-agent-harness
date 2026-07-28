@@ -314,6 +314,28 @@ export function enablePullRequestAutoMerge(
   return { ok: true };
 }
 
+export function disablePullRequestAutoMerge(
+  repo: RepoConfig,
+  number: number,
+): { ok: boolean; error?: string } {
+  const result = execFile(
+    "gh",
+    ["pr", "merge", String(number), "--repo", repo.github, "--disable-auto"],
+    { timeoutMs: 120_000 },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      error:
+        result.stderr.trim() ||
+        result.error ||
+        result.stdout.trim() ||
+        "gh pr merge --disable-auto failed",
+    };
+  }
+  return { ok: true };
+}
+
 export function branchHasRequiredStatusChecks(repo: RepoConfig): {
   ok: boolean;
   configured?: boolean;
