@@ -122,4 +122,13 @@ Status rules:
 - `uncertain` if either axis, issue retrieval, snapshot verification, or required evidence is incomplete
 - `pass` only when both axes have zero blocking findings and validation succeeds
 
+For every newly emitted `uncertain` result, include an `uncertain_reason` field:
+
+- `reviewer_infrastructure` only when a required Standards or Spec reviewer could not complete due to a transient provider, network, or service failure and no completed evidence has a blocking finding. This lets Harness retry the full independent audit; it never permits a merge.
+- `evidence_incomplete` when required evidence is unavailable for another reason.
+- `snapshot_mismatch` when the fixed base or expected HEAD cannot be verified.
+- `other` for every remaining uncertainty, with an explanation in `notes`.
+
+Do not emit `uncertain_reason` for `pass` or `fail`. When uncertain about classification, use `other`; it remains fail-closed.
+
 Never modify tracked product files. The dispatched `.harness/` result path is the only allowed write. Do not create, delete, or clean up `.pi-subagents/`; if it unexpectedly appears despite `artifacts: false`, leave it untouched and note it without raising a cleanup decision gate.

@@ -46,6 +46,15 @@ Use `"blocking": false` for smell judgement calls that do not violate a document
 - Blocking: Spec missing/partial/incorrect/scope_creep; documented Standards hard violations; validation failures; uncertain outcomes.
 - Non-blocking alone: Fowler smell judgement calls.
 
+When `status` is `"uncertain"`, include an `"uncertain_reason"` field with exactly one of:
+
+- `"reviewer_infrastructure"`: a required Standards or Spec reviewer could not complete because of a transient provider, network, or service failure. Use this only when no completed evidence contains a blocking finding; Harness may run a fresh full audit, never merge this result.
+- `"evidence_incomplete"`: required evidence is unavailable or incomplete for a non-transient reason.
+- `"snapshot_mismatch"`: the fixed base or expected HEAD could not be verified.
+- `"other"`: another uncertainty; explain it in `notes`.
+
+Omit `uncertain_reason` for `"pass"` and `"fail"`. If unsure which category applies, use `"other"`; that remains fail-closed.
+
 ## On completion
 
 Send `worker_done` with:

@@ -53,7 +53,8 @@ type AuditFixtureMode =
   | "rework-stale-terminal"
   | "audit-retry"
   | "audit-retry-lock-wait"
-  | "audit-retry-artifact-race";
+  | "audit-retry-artifact-race"
+  | "audit-infra-retry";
 
 test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
   const fixture = createAuditFixture((baseSha, headSha) =>
@@ -478,6 +479,84 @@ for (const scenario of evidenceFailureCases) {
     );
   });
 }
+
+test("retries a reviewer infrastructure uncertainty with a fresh audit", (t) => {
+  const fixture = createAuditFixture(
+    reviewerInfrastructureUncertain,
+    "audit-infra-retry",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markCompletedAudit(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 2);
+  assert.equal(
+    verified.getJob("job-audit")?.auditor_task_id,
+    "task-audit-new",
+  );
+  assert.equal(verified.getJob("job-audit")?.implementer_task_id, null);
+  verified.close();
+
+  const firstAttempt = JSON.parse(
+    readFileSync(
+      join(fixture.worktree, ".harness", "audit-result.r1.json"),
+      "utf8",
+    ),
+  ) as { status?: string; uncertain_reason?: string };
+  assert.equal(firstAttempt.status, "uncertain");
+  assert.equal(firstAttempt.uncertain_reason, "reviewer_infrastructure");
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
+test("keeps reviewer infrastructure uncertainty fail-closed at the audit-attempt limit", (t) => {
+  const fixture = createAuditFixture(
+    reviewerInfrastructureUncertain,
+    "audit-infra-retry",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  writeFileSync(
+    fixture.configPath,
+    readFileSync(fixture.configPath, "utf8").replace(
+      "maxAuditRounds: 3",
+      "maxAuditRounds: 1",
+    ),
+  );
+  markCompletedAudit(fixture);
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.message, /reviewer_infrastructure/);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
 
 test("an actionable audit failure still enters rework dispatch", (t) => {
   const fixture = createAuditFixture(actionableAuditFailure);
@@ -1288,6 +1367,8 @@ appendFileSync(join(dir, "calls.jsonl"), JSON.stringify(args) + "\\n");
 const mode = readFileSync(join(dir, "mode"), "utf8");
 const reworkMode = mode.startsWith("rework-");
 const auditRetryMode = mode.startsWith("audit-retry");
+const auditInfrastructureRetryMode = mode === "audit-infra-retry";
+const freshAuditMode = auditRetryMode || auditInfrastructureRetryMode;
 const statePath = join(dir, "state.json");
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const key = args.slice(0, 2).join(" ");
@@ -1378,7 +1459,7 @@ if (args[0] === "status") {
             : "Working on task-audit-new"]
         : mode === "rework-retry-drift" && fresh
         ? ["Provider unavailable: model error"]
-        : auditRetryMode
+        : freshAuditMode
           ? ["Working on task-audit-new"]
           : reworkMode
             ? ["Working on task-rework"]
@@ -1450,7 +1531,7 @@ if (args[0] === "status") {
     console.log(JSON.stringify({ ok: true, result:
       state.tasks === 1 ? { dispatchId: "dispatch-rework-1" } : {}
     }));
-  } else if (reworkMode || auditRetryMode) {
+  } else if (reworkMode || freshAuditMode) {
     const headSha = execFileSync(
       "git",
       ["-C", ${JSON.stringify(worktree)}, "rev-parse", "HEAD"],
@@ -1483,7 +1564,7 @@ if (args[0] === "status") {
     console.log(JSON.stringify({ ok: true, result: {} }));
   }
 } else if (key === "orchestration task-update") {
-  if (reworkMode || auditRetryMode) {
+  if (reworkMode || freshAuditMode) {
     console.log(JSON.stringify({ ok: true, result: {} }));
   } else {
     console.log(JSON.stringify({ ok: false, error: {
@@ -1493,11 +1574,11 @@ if (args[0] === "status") {
   }
 } else if (
   key === "orchestration check" &&
-  (reworkMode || auditRetryMode)
+  (reworkMode || freshAuditMode)
 ) {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));
-  if (auditRetryMode) {
+  if (freshAuditMode) {
     console.log(JSON.stringify({ ok: true, result: { messages: [{
       type: "worker_done",
       taskId: "task-audit-new",
@@ -1804,6 +1885,15 @@ function actionableAuditFailure(
 ): AuditResult {
   const result = auditResult("fail", baseSha, headSha);
   result.spec.incorrect_implementation = [{ summary: "wrong behavior" }];
+  return result;
+}
+
+function reviewerInfrastructureUncertain(
+  baseSha: string,
+  headSha: string,
+): AuditResult {
+  const result = auditResult("uncertain", baseSha, headSha);
+  result.uncertain_reason = "reviewer_infrastructure";
   return result;
 }
 

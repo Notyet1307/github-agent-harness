@@ -198,7 +198,8 @@ function auditOnceLocked(
     controller_terminal_handle: controller.handle,
   });
 
-  // Max rounds of audit (each fail → rework → audit counts as progress toward max)
+  // Max audit attempts. A retryable reviewer-infrastructure uncertainty consumes
+  // an attempt too, so transient failures cannot create an unbounded loop.
   const maxRounds = config.maxAuditRounds;
 
   while (true) {
@@ -270,6 +271,32 @@ function auditOnceLocked(
     }
 
     const gate = audited.details?.gate;
+    if (gate?.retryableReviewerInfrastructureFailure && round < maxRounds) {
+      job = ledger.updateJob(job.id, {
+        // Keep the job in the audit phase, but clear the completed auditor
+        // identity so the next iteration must create a fresh independent audit.
+        state: "auditing",
+        audit_round: round + 1,
+        auditor_terminal_handle: null,
+        auditor_task_id: null,
+        auditor_dispatch_id: null,
+        dispatch_attempt: 0,
+        dispatch_probe_pending: 0,
+        last_error:
+          `retrying reviewer infrastructure uncertainty after audit r${round}: ` +
+          audited.message,
+      });
+      setWorktreeProgress(
+        orcaCli,
+        job.worktree_id!,
+        `harness: retrying audit after reviewer infrastructure uncertainty r${round} → r${round + 1}`,
+        "in-review",
+      );
+      log(
+        `retrying reviewer infrastructure uncertainty with fresh audit round ${round + 1}/${maxRounds}`,
+      );
+      continue;
+    }
     if (gate?.uncertain) {
       job = ledger.updateJob(job.id, {
         state: "blocked",

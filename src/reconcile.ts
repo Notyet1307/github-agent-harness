@@ -1,4 +1,5 @@
 import type { AuditArtifactInspection } from "./audit-gate.js";
+import { isRetryablePushFailure } from "./push-failure.js";
 import type { Job, JobState } from "./types.js";
 
 export const IMPLEMENT_NO_COMMITS_ERROR =
@@ -21,7 +22,8 @@ export type RecoverAction =
       reason: string;
       recovery?:
         | "retry_malformed_result"
-        | "retry_validation_only_rework";
+        | "retry_validation_only_rework"
+        | "retry_stale_result";
     }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
@@ -176,6 +178,23 @@ export function reconcileJob(
         };
       }
       if (
+        isRetryablePushFailure(job.last_error) &&
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        hints.auditArtifactStatus === "current" &&
+        hints.auditResultReady === true &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "publish_once",
+          reason:
+            "blocked push has current completed audit evidence; retry publishing",
+        };
+      }
+      if (
         job.auditor_task_id &&
         job.audit_round > 0 &&
         job.audit_head_sha === hints.currentHeadSha &&
@@ -209,6 +228,23 @@ export function reconcileJob(
           reason:
             "completed validation-only rework may explicitly dispatch a fresh auditor for the same HEAD",
           recovery: "retry_validation_only_rework",
+        };
+      }
+      if (
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        typeof hints.currentHeadSha === "string" &&
+        job.audit_head_sha !== hints.currentHeadSha &&
+        hints.auditArtifactStatus === "stale" &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "clean commits landed after the completed audit; dispatch a fresh audit",
+          recovery: "retry_stale_result",
         };
       }
       if (

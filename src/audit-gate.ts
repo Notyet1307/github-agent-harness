@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execFile } from "./exec.js";
-import type { AuditFinding, AuditResult } from "./types.js";
+import type {
+  AuditFinding,
+  AuditResult,
+  AuditUncertainReason,
+} from "./types.js";
 
 export type GateDecision = {
   pass: boolean;
@@ -10,6 +14,8 @@ export type GateDecision = {
   blockingSpec: number;
   validationFailures: number;
   uncertain: boolean;
+  /** Safe to re-run the complete audit, never safe to merge. */
+  retryableReviewerInfrastructureFailure: boolean;
 };
 
 export function loadAuditResult(path: string): {
@@ -79,23 +85,34 @@ export function evaluateAuditGate(
       blockingSpec: 0,
       validationFailures: 0,
       uncertain: true,
+      retryableReviewerInfrastructureFailure: false,
     };
   }
 
   if (result.status === "uncertain") {
+    const blockingStandards = countBlocking(
+      result.standards?.documented_standard_violations,
+    );
+    const blockingSpec =
+      countBlocking(result.spec?.missing_or_partial) +
+      countBlocking(result.spec?.incorrect_implementation) +
+      countBlocking(result.spec?.scope_creep);
+    const validationFailures = countValidationFailures(result);
     return {
       pass: false,
-      reason: "auditor reported uncertain",
+      reason: result.uncertain_reason
+        ? `auditor reported uncertain (${result.uncertain_reason})`
+        : "auditor reported uncertain",
       result,
-      blockingStandards: countBlocking(
-        result.standards?.documented_standard_violations,
-      ),
-      blockingSpec:
-        countBlocking(result.spec?.missing_or_partial) +
-        countBlocking(result.spec?.incorrect_implementation) +
-        countBlocking(result.spec?.scope_creep),
-      validationFailures: countValidationFailures(result),
+      blockingStandards,
+      blockingSpec,
+      validationFailures,
       uncertain: true,
+      retryableReviewerInfrastructureFailure:
+        result.uncertain_reason === "reviewer_infrastructure" &&
+        blockingStandards === 0 &&
+        blockingSpec === 0 &&
+        validationFailures === 0,
     };
   }
 
@@ -112,6 +129,7 @@ export function evaluateAuditGate(
       blockingSpec: 0,
       validationFailures: 0,
       uncertain: true,
+      retryableReviewerInfrastructureFailure: false,
     };
   }
   if (
@@ -126,6 +144,7 @@ export function evaluateAuditGate(
       blockingSpec: 0,
       validationFailures: 0,
       uncertain: true,
+      retryableReviewerInfrastructureFailure: false,
     };
   }
 
@@ -155,6 +174,7 @@ export function evaluateAuditGate(
       blockingSpec,
       validationFailures,
       uncertain,
+      retryableReviewerInfrastructureFailure: false,
     };
   }
 
@@ -167,6 +187,7 @@ export function evaluateAuditGate(
       blockingSpec,
       validationFailures,
       uncertain: true,
+      retryableReviewerInfrastructureFailure: false,
     };
   }
 
@@ -178,6 +199,7 @@ export function evaluateAuditGate(
     blockingSpec: 0,
     validationFailures: 0,
     uncertain: false,
+    retryableReviewerInfrastructureFailure: false,
   };
 }
 
@@ -229,6 +251,14 @@ function auditResultError(value: unknown): string | null {
   if (!["pass", "fail", "uncertain"].includes(String(value.status))) {
     return "status must be pass, fail, or uncertain";
   }
+  if (value.uncertain_reason !== undefined) {
+    if (value.status !== "uncertain") {
+      return "uncertain_reason is only allowed when status is uncertain";
+    }
+    if (!isAuditUncertainReason(value.uncertain_reason)) {
+      return "uncertain_reason is invalid";
+    }
+  }
   if (!fullSha(value.base_sha)) return "base_sha must be a full 40-character SHA";
   if (!fullSha(value.head_sha)) return "head_sha must be a full 40-character SHA";
 
@@ -270,6 +300,17 @@ function auditResultError(value: unknown): string | null {
     return "notes must be a string";
   }
   return null;
+}
+
+function isAuditUncertainReason(
+  value: unknown,
+): value is AuditUncertainReason {
+  return (
+    value === "reviewer_infrastructure" ||
+    value === "evidence_incomplete" ||
+    value === "snapshot_mismatch" ||
+    value === "other"
+  );
 }
 
 function findingArray(value: unknown): boolean {

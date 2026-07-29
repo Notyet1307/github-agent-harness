@@ -11,6 +11,7 @@ import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaStatus, requireOrcaCli } from "./orca.js";
 import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
+import { recordPushFailure } from "./push-failure.js";
 import { setWorktreeProgress } from "./orca-runtime.js";
 import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
 
@@ -170,11 +171,19 @@ function publishOnceLocked(
     { timeoutMs: 120_000 },
   );
   if (!push.ok) {
-    return block(
-      ledger,
-      job,
-      `git push failed: ${push.stderr || push.error || push.stdout}`,
+    const detail = [push.stderr, push.error, push.stdout]
+      .map((value) => value?.trim())
+      .filter(Boolean)
+      .join("\n") || "unknown git push failure";
+    const failure = recordPushFailure(
+      detail,
+      job.last_error,
     );
+    ledger.updateJob(job.id, {
+      state: failure.retryable ? "audit_passed" : "blocked",
+      last_error: failure.error,
+    });
+    return { ok: false, jobId: job.id, message: failure.error };
   }
   log("push ok");
 

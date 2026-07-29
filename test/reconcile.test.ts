@@ -334,6 +334,80 @@ test("blocked malformed audit routes to a fresh explicit recovery", () => {
   }
 });
 
+test("blocked stale audit retries against a newer clean HEAD", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error: "auditor reported uncertain",
+    }),
+    {
+      auditArtifactStatus: "stale",
+      auditResultReady: false,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "newer-head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_stale_result");
+  }
+});
+
+test("blocked transient push failure retries publishing with current audit evidence", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error:
+        "git push failed: fatal: unable to access 'https://github.com/owner/repo.git/': Could not resolve host: github.com",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "publish_once");
+});
+
+test("blocked permanent push failure does not retry publishing", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error:
+        "git push failed: remote: Permission to owner/repo.git denied to bot.",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "blocked");
+});
+
 test("blocked malformed audit stays blocked without completed provenance", () => {
   const action = reconcileJob(
     job({

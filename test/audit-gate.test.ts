@@ -71,6 +71,9 @@ test("loadAuditResult requires full SHAs and actual validation evidence", (t) =>
         "bare violation" as never,
       ];
     },
+    (result) => {
+      result.uncertain_reason = "reviewer_infrastructure";
+    },
   ];
 
   for (const invalidate of invalidCases) {
@@ -136,6 +139,29 @@ test("evaluateAuditGate treats a fail without actionable evidence as uncertain",
 
   assert.equal(gate.pass, false);
   assert.equal(gate.uncertain, true);
+});
+
+test("evaluateAuditGate retries only clean reviewer infrastructure uncertainty", () => {
+  const result = validAuditResult();
+  result.status = "uncertain";
+  result.uncertain_reason = "reviewer_infrastructure";
+
+  const clean = evaluateAuditGate(result, {
+    expectedBaseSha: baseSha,
+    expectedHeadSha: headSha,
+  });
+  assert.equal(clean.pass, false);
+  assert.equal(clean.uncertain, true);
+  assert.equal(clean.retryableReviewerInfrastructureFailure, true);
+
+  result.spec.incorrect_implementation = [{ summary: "actual defect" }];
+  const withFinding = evaluateAuditGate(result, {
+    expectedBaseSha: baseSha,
+    expectedHeadSha: headSha,
+  });
+  assert.equal(withFinding.pass, false);
+  assert.equal(withFinding.uncertain, true);
+  assert.equal(withFinding.retryableReviewerInfrastructureFailure, false);
 });
 
 test("trackedDirty fails closed when git cannot run", () => {
