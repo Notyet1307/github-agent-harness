@@ -9,7 +9,17 @@ import {
 import type { IssueCandidate, Job, JobState, RepoConfig } from "./types.js";
 import { TERMINAL_JOB_STATES } from "./types.js";
 
-const LEDGER_SCHEMA_VERSION = 1;
+const LEDGER_SCHEMA_VERSION = 3;
+
+export type NotificationDelivery = {
+  event_key: string;
+  job_id: string;
+  reminder_minutes: number;
+  attempts: number;
+  delivered_at: string | null;
+  last_attempt_at: string;
+  last_error: string | null;
+};
 
 type JobPatch = Partial<
   Pick<
@@ -40,6 +50,8 @@ type JobPatch = Partial<
     | "pr_url"
     | "merged_at"
     | "last_error"
+    | "intervention_json"
+    | "intervention_resolved_at"
     | "head_sha"
   >
 >;
@@ -99,6 +111,8 @@ export class Ledger {
           pr_url TEXT,
           merged_at TEXT,
           last_error TEXT,
+          intervention_json TEXT,
+          intervention_resolved_at TEXT,
           head_sha TEXT,
           revision INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL,
@@ -106,6 +120,18 @@ export class Ledger {
           UNIQUE(repo, issue_number)
         );
         CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
+        CREATE TABLE IF NOT EXISTS notification_deliveries (
+          event_key TEXT NOT NULL,
+          job_id TEXT NOT NULL,
+          reminder_minutes INTEGER NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          delivered_at TEXT,
+          last_attempt_at TEXT NOT NULL,
+          last_error TEXT,
+          PRIMARY KEY(event_key, reminder_minutes)
+        );
+        CREATE INDEX IF NOT EXISTS idx_notification_job
+          ON notification_deliveries(job_id);
       `);
 
       if (version.user_version < 1) {
@@ -124,6 +150,16 @@ export class Ledger {
         this.ensureColumn("project_revision", "TEXT");
         this.ensureColumn("project_snapshot_json", "TEXT");
         this.db.exec("PRAGMA user_version = 1");
+      }
+
+      if (version.user_version < 2) {
+        this.ensureColumn("intervention_json", "TEXT");
+        this.ensureColumn("intervention_resolved_at", "TEXT");
+        this.db.exec("PRAGMA user_version = 2");
+      }
+
+      if (version.user_version < 3) {
+        this.db.exec("PRAGMA user_version = 3");
       }
 
       this.db.exec("COMMIT");
@@ -177,6 +213,72 @@ export class Ledger {
         `SELECT * FROM jobs ORDER BY datetime(updated_at) DESC LIMIT ?`,
       )
       .all(limit) as Job[];
+  }
+
+  getNotificationDelivery(
+    eventKey: string,
+    reminderMinutes: number,
+  ): NotificationDelivery | null {
+    return (
+      (this.db
+        .prepare(
+          `SELECT * FROM notification_deliveries
+           WHERE event_key = ? AND reminder_minutes = ?`,
+        )
+        .get(eventKey, reminderMinutes) as NotificationDelivery | undefined) ??
+      null
+    );
+  }
+
+  reserveNotificationAttempt(input: {
+    eventKey: string;
+    jobId: string;
+    reminderMinutes: number;
+    maxAttempts: number;
+  }): NotificationDelivery | null {
+    const existing = this.getNotificationDelivery(
+      input.eventKey,
+      input.reminderMinutes,
+    );
+    if (existing?.delivered_at || (existing?.attempts ?? 0) >= input.maxAttempts) {
+      return null;
+    }
+    const now = isoNow();
+    this.db
+      .prepare(
+        `INSERT INTO notification_deliveries (
+           event_key, job_id, reminder_minutes, attempts,
+           delivered_at, last_attempt_at, last_error
+         ) VALUES (?, ?, ?, 1, NULL, ?, 'delivery interrupted before completion')
+         ON CONFLICT(event_key, reminder_minutes) DO UPDATE SET
+           attempts = attempts + 1,
+           last_attempt_at = excluded.last_attempt_at,
+           last_error = excluded.last_error`,
+      )
+      .run(input.eventKey, input.jobId, input.reminderMinutes, now);
+    return this.getNotificationDelivery(input.eventKey, input.reminderMinutes);
+  }
+
+  completeNotificationAttempt(input: {
+    eventKey: string;
+    reminderMinutes: number;
+    delivered: boolean;
+    error?: string;
+  }): void {
+    this.db
+      .prepare(
+        `UPDATE notification_deliveries SET
+           delivered_at = CASE WHEN ? THEN ? ELSE delivered_at END,
+           last_error = ?
+         WHERE event_key = ? AND reminder_minutes = ?`,
+      )
+      .run(
+        input.delivered ? 1 : 0,
+        isoNow(),
+        input.delivered ? null : (input.error ?? "notification command failed"),
+        input.eventKey,
+        input.reminderMinutes,
+      );
   }
 
   ledgerIssueNumbers(repo: string): Set<number> {
@@ -374,6 +476,8 @@ export class Ledger {
               pr_url = NULL,
               merged_at = NULL,
               last_error = NULL,
+              intervention_json = NULL,
+              intervention_resolved_at = NULL,
               head_sha = NULL,
               revision = 0,
               created_at = ?,

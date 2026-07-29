@@ -79,7 +79,16 @@ test("opening a version-zero ledger preserves jobs and upgrades project snapshot
   const version = inspection.prepare("PRAGMA user_version").get() as {
     user_version: number;
   };
-  assert.equal(version.user_version, 1);
+  assert.equal(version.user_version, 3);
+  assert.equal(job?.intervention_json, null);
+  assert.equal(job?.intervention_resolved_at, null);
+  const notificationTable = inspection
+    .prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type = 'table' AND name = 'notification_deliveries'`,
+    )
+    .get() as { name: string } | undefined;
+  assert.equal(notificationTable?.name, "notification_deliveries");
 });
 
 test("opening an upgraded ledger repeatedly is idempotent", (t) => {
@@ -95,4 +104,28 @@ test("opening an upgraded ledger repeatedly is idempotent", (t) => {
   const job = reopened.getJob("legacy-job");
   assert.equal(job?.state, "awaiting_audit");
   assert.equal(job?.project_snapshot_json, null);
+});
+
+test("opening a version-one ledger adds intervention provenance columns", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "harness-ledger-migration-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "ledger.sqlite");
+  createVersionZeroLedger(path);
+  const old = new DatabaseSync(path);
+  old.exec("PRAGMA user_version = 1");
+  old.close();
+
+  const ledger = new Ledger(path);
+  t.after(() => ledger.close());
+  assert.equal(ledger.getJob("legacy-job")?.intervention_json, null);
+
+  const inspection = new DatabaseSync(path, { readOnly: true });
+  t.after(() => inspection.close());
+  const columns = inspection.prepare("PRAGMA table_info(jobs)").all() as Array<{
+    name: string;
+  }>;
+  assert.ok(columns.some((column) => column.name === "intervention_json"));
+  assert.ok(
+    columns.some((column) => column.name === "intervention_resolved_at"),
+  );
 });

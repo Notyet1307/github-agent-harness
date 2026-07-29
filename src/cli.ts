@@ -12,6 +12,7 @@ import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { checkSetupIdle } from "./setup.js";
+import { cancelJob, cleanupJobs, type LifecycleResult } from "./lifecycle.js";
 import {
   addProject,
   ensureHarnessRepo,
@@ -34,7 +35,9 @@ Usage:
   harness audit-once [--config path] [--no-rework]
   harness publish-once [--config path]
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
-  harness recover [--config path] [--dry-run] [--execute]
+  harness recover [--config path] [--dry-run] [--execute] [--acknowledge-escalation | --reply text]
+  harness cancel [--job ID] [--reason text] [--remove-worktree] [--dry-run | --execute] [--config path]
+  harness cleanup [--job ID] [--dry-run | --execute] [--config path]
   harness work [--config path] [--repo OWNER/REPO] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness status [--config path]
@@ -324,12 +327,22 @@ function main(argv: string[]): number {
   }
 
   if (cmd === "recover") {
+    const acknowledgeEscalation = args.includes("--acknowledge-escalation");
+    const decisionReply = readFlag(args, "--reply");
+    if (acknowledgeEscalation && decisionReply != null) {
+      process.stderr.write(
+        "recover accepts only one of --acknowledge-escalation or --reply\n",
+      );
+      return 2;
+    }
     // Default dry-run for safety; --execute resumes the pipeline step.
     const dryRun = !args.includes("--execute");
     const result = recover({
       configPath,
       dryRun,
       waitMergeTimeoutMinutes: 0,
+      acknowledgeEscalation,
+      decisionReply,
     });
     process.stdout.write(
       `\n${result.ok ? "OK" : "FAIL"}: ${result.message}\n`,
@@ -341,11 +354,50 @@ function main(argv: string[]): number {
     if (result.details) {
       process.stdout.write(`${JSON.stringify(result.details, null, 2)}\n`);
     }
-    if (dryRun && result.action.kind !== "none" && result.action.kind !== "noop") {
+    if (dryRun && result.action.kind === "resolve_intervention") {
+      process.stdout.write(
+        result.action.intervention === "decision_gate"
+          ? "\nAfter reviewing the request, use --execute --reply <text>.\n"
+          : "\nAfter reviewing the escalation, use --execute --acknowledge-escalation.\n",
+      );
+    } else if (
+      dryRun &&
+      !["none", "noop", "blocked"].includes(result.action.kind)
+    ) {
       process.stdout.write(
         "\nRe-run with --execute to resume the ensure* step.\n",
       );
     }
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "cancel") {
+    if (args.includes("--dry-run") && args.includes("--execute")) {
+      process.stderr.write("cancel accepts only one of --dry-run or --execute\n");
+      return 2;
+    }
+    const result = cancelJob({
+      configPath,
+      jobId: readFlag(args, "--job"),
+      reason: readFlag(args, "--reason"),
+      removeWorktree: args.includes("--remove-worktree"),
+      dryRun: !args.includes("--execute"),
+    });
+    printLifecycleResult(result);
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "cleanup") {
+    if (args.includes("--dry-run") && args.includes("--execute")) {
+      process.stderr.write("cleanup accepts only one of --dry-run or --execute\n");
+      return 2;
+    }
+    const result = cleanupJobs({
+      configPath,
+      jobId: readFlag(args, "--job"),
+      dryRun: !args.includes("--execute"),
+    });
+    printLifecycleResult(result);
     return result.ok ? 0 : 1;
   }
 
@@ -455,6 +507,17 @@ function printEnrollmentResult(
   for (const action of result.actions) {
     process.stdout.write(
       `  ${action.applied ? "APPLIED" : "WOULD"} ${action.kind}\n`,
+    );
+  }
+}
+
+function printLifecycleResult(result: LifecycleResult): void {
+  process.stdout.write(`${result.ok ? "OK" : "FAIL"}: ${result.message}\n`);
+  for (const entry of result.items) {
+    const prefix = entry.executed ? "APPLIED" : entry.ok ? "PLAN" : "REFUSE";
+    process.stdout.write(
+      `  ${prefix} ${entry.action} ${entry.repo}#${entry.issueNumber} ` +
+        `(job ${entry.jobId}): ${entry.message}\n`,
     );
   }
 }

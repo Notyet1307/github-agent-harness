@@ -925,6 +925,15 @@ function runOnceLocked(
           const updated = ledger.updateJobIf(job.id, job.revision, {
             state: "blocked",
             last_error: recoveryError,
+            intervention_json: done.intervention
+              ? JSON.stringify({
+                  ...done.intervention,
+                  sourceState: "implementing",
+                  role: "implementer",
+                  headSha: lateHead,
+                })
+              : null,
+            intervention_resolved_at: null,
           });
           if (!updated) return jobChangedWhileWaiting();
           job = updated;
@@ -1064,6 +1073,8 @@ function runOnceLocked(
     dispatch_attempt: 0,
     dispatch_probe_pending: 0,
     last_error: null,
+    intervention_json: null,
+    intervention_resolved_at: null,
   });
   if (!completed) return jobChangedWhileWaiting();
   job = completed;

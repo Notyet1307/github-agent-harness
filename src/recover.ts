@@ -18,6 +18,8 @@ export function recover(options: {
   dryRun?: boolean;
   /** When executing wait_merge, only poll once by default. */
   waitMergeTimeoutMinutes?: number;
+  acknowledgeEscalation?: boolean;
+  decisionReply?: string;
 }): RecoverResult {
   const cycle = new WorkCoordinator().cycle({
     mode: "explicit_recovery",
@@ -26,6 +28,8 @@ export function recover(options: {
     lockPath: options.lockPath,
     dryRun: options.dryRun,
     waitMergeTimeoutMinutes: options.waitMergeTimeoutMinutes,
+    acknowledgeEscalation: options.acknowledgeEscalation,
+    decisionReply: options.decisionReply,
   });
   const executed = recoverResult(cycle);
   if (executed) return executed;
@@ -34,7 +38,7 @@ export function recover(options: {
   return {
     ok:
       cycle.plan.inspectionOk &&
-      (Boolean(options.dryRun) || action.kind !== "blocked"),
+      action.kind !== "blocked",
     message: cycle.plan.reason,
     action,
     jobId: cycle.plan.jobId,

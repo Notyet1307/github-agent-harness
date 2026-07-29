@@ -21,8 +21,9 @@ pull request or silently skips a failed job. By default it waits for a human
 merge. Optional auto mode asks GitHub to merge the audited PR head, while
 GitHub remains responsible for CI and review rules.
 
-The controller runs in the foreground. It does not install a background service
-or delete completed worktrees.
+The controller runs in the foreground. It does not install a background service.
+Completed or cancelled worktrees are removed only by the explicit, dry-run-first
+`cleanup` command.
 
 ## Configure
 
@@ -142,6 +143,33 @@ auto-merge error keeps the job visible for explicit recovery; any existing
 auto-merge request is disabled when Harness observes an unsafe PR state.
 Harness does not auto-rework or jump to another issue.
 
+### Notify an unattended operator
+
+Harness can pass an unresolved worker escalation or decision gate to any local
+command on stdin. The hook receives a complete, copyable message: repository
+and issue, pipeline stage and role, exact job/task/dispatch/message/HEAD
+provenance, worker-supplied options and recommendation when present, a
+conservative Harness recommendation, and the explicit recovery command.
+
+For an existing Hermes Telegram pairing, use:
+
+~~~yaml
+notifications:
+  enabled: true
+  command: [hermes, send, --to, telegram, --file, "-", --json]
+  timeoutSeconds: 30
+  reminderMinutes: [0, 30, 120]
+  maxAttemptsPerReminder: 3
+~~~
+
+This reuses Hermes credentials; do not copy a Telegram token into Harness.
+Before leaving the watcher unattended, verify `hermes gateway status` and
+`hermes send --list telegram`. The notification command runs without a shell,
+is deduplicated in the ledger, and retries each reminder a bounded number of
+times. Delivery failure never unblocks the job. Phase 1 is intentionally
+one-way: replying in Telegram does not execute a decision. Review the message,
+then run its `harness recover --execute ...` command locally.
+
 ### Recover safely
 
 If the process stops or a job is blocked, inspect before doing anything else:
@@ -154,11 +182,57 @@ pnpm harness recover --dry-run
 Use **recover --execute** only after reviewing the plan. Do not edit
 **data/harness.sqlite** by hand.
 
+Worker escalations and decision gates are stored in the ledger with their exact
+task, dispatch, message, role, and pipeline-stage provenance. Harness never
+answers a decision gate with a generic response. Inspect the request in
+`status` or `recover --dry-run`, then resolve it explicitly:
+
+~~~bash
+# Accept a completed escalated worker result only after reviewing it.
+pnpm harness recover --execute --acknowledge-escalation
+
+# Send the operator's actual decision, then resume the same task.
+pnpm harness recover --execute --reply "Stay within the issue scope; do not migrate historical data"
+~~~
+
+Acknowledging an escalation still requires the exact recorded task and dispatch,
+a completed Orca task, a clean tracked worktree, verified base ancestry, and the
+expected commit or audit artifact. A later exact `worker_done` in the same inbox
+batch takes precedence over an older escalation.
+
+If the active GitHub issue is closed, Harness blocks instead of silently
+discarding the job. Preview and explicitly cancel it with a reason:
+
+~~~bash
+pnpm harness cancel --reason "issue closed as not planned" --dry-run
+pnpm harness cancel --reason "issue closed as not planned" --execute
+~~~
+
+Cancellation is idempotent and releases the single job slot. It preserves the
+Orca worktree and Git branch by default. Add `--remove-worktree` only after the
+cancel preview confirms that cleanup is safe.
+
 If a post-audit rework worker times out without producing a new commit,
 `recover --dry-run` proposes a redispatch only when the old task has failed,
 the worktree is still clean at the audited commit, and the audit evidence is
 still current. After reviewing that plan, use `recover --execute` to retry the
 rework. `watch` does not retry this case automatically.
+
+### Clean terminal worktrees
+
+Preview cleanup of merged and cancelled jobs before applying it:
+
+~~~bash
+pnpm harness cleanup --dry-run
+pnpm harness cleanup --job JOB_ID --execute
+~~~
+
+Cleanup never touches an active job or deletes its branch. It refuses a
+worktree with tracked or untracked changes, verifies the recorded Orca
+worktree identity plus the checked-out branch and HEAD, removes the worktree
+through Orca (which closes its terminals), and then clears stale runtime
+handles from the ledger. Omitting `--job` applies the reviewed plan to all
+eligible terminal jobs.
 
 ## Reference
 

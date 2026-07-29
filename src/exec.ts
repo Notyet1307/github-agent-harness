@@ -11,13 +11,19 @@ export type ExecResult = {
 export function execFile(
   command: string,
   args: string[],
-  options: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    cwd?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    input?: string;
+  } = {},
 ): ExecResult {
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     encoding: "utf8",
     timeout: options.timeoutMs ?? 60_000,
     env: { ...process.env, ...options.env },
+    input: options.input,
     maxBuffer: 20 * 1024 * 1024,
   });
 

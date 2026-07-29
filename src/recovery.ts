@@ -9,6 +9,7 @@ import { checkAncestor, commitCountSince, revParse } from "./git.js";
 import { execFile } from "./exec.js";
 import {
   findPrByHead,
+  viewIssue,
   viewPullRequest,
 } from "./github.js";
 import { Ledger } from "./ledger.js";
@@ -27,7 +28,13 @@ import { runOnce } from "./run-once.js";
 import { auditOnce } from "./audit-once.js";
 import { publishOnce } from "./publisher.js";
 import { waitMerge } from "./merge-monitor.js";
-import type { Job, RepoConfig, RuntimeHarnessConfig } from "./types.js";
+import type {
+  Job,
+  JobState,
+  RepoConfig,
+  RuntimeHarnessConfig,
+} from "./types.js";
+import { parseWorkerIntervention } from "./intervention.js";
 
 export type RecoverResult = {
   ok: boolean;
@@ -50,6 +57,8 @@ export function runRecoveryCycle(options: {
   mode?: "automatic" | "explicit_recovery";
   /** When executing wait_merge, only poll once by default. */
   waitMergeTimeoutMinutes?: number;
+  acknowledgeEscalation?: boolean;
+  decisionReply?: string;
 }): RecoverResult {
   const config = loadRuntimeConfig(options.configPath);
   const lock = acquireLock(options.lockPath ?? defaultLockPath());
@@ -99,6 +108,7 @@ export function runRecoveryCycle(options: {
         state: job?.state ?? null,
         repo: job ? `${job.repo}#${job.issue_number}` : null,
         hints,
+        intervention: job ? parseWorkerIntervention(job) : null,
       },
       executed: false,
     };
@@ -113,6 +123,25 @@ export function runRecoveryCycle(options: {
 
     if (options.dryRun || action.kind === "noop" || action.kind === "none") {
       return base;
+    }
+    if (action.kind === "resolve_intervention") {
+      if (!job || !project?.ok) {
+        return {
+          ...base,
+          ok: false,
+          message: "cannot resolve intervention without an active job and valid project",
+        };
+      }
+      return resolveWorkerIntervention({
+        action,
+        job,
+        hints,
+        ledger,
+        config,
+        acknowledgeEscalation: options.acknowledgeEscalation,
+        decisionReply: options.decisionReply,
+        base,
+      });
     }
     if (action.kind === "blocked") {
       if (action.persist && job) {
@@ -360,6 +389,222 @@ export function runRecoveryCycle(options: {
   }
 }
 
+export function resolveWorkerIntervention(input: {
+  action: Extract<RecoverAction, { kind: "resolve_intervention" }>;
+  job: Job;
+  hints: ReconcileHints;
+  ledger: Ledger;
+  config: RuntimeHarnessConfig;
+  acknowledgeEscalation?: boolean;
+  decisionReply?: string;
+  base: RecoverResult;
+}): RecoverResult {
+  const intervention = parseWorkerIntervention(input.job);
+  if (!intervention) {
+    return { ...input.base, ok: false, message: "stored intervention is malformed" };
+  }
+  if (intervention.kind !== input.action.intervention) {
+    return {
+      ...input.base,
+      ok: false,
+      message: "intervention changed after recovery planning; re-run dry-run",
+    };
+  }
+  const expectedTask =
+    intervention.role === "auditor"
+      ? input.job.auditor_task_id
+      : input.job.implementer_task_id;
+  const expectedDispatch =
+    intervention.role === "auditor"
+      ? input.job.auditor_dispatch_id
+      : input.job.implementer_dispatch_id;
+  if (
+    intervention.taskId !== expectedTask ||
+    intervention.dispatchId !== expectedDispatch
+  ) {
+    return {
+      ...input.base,
+      ok: false,
+      message: "stored intervention no longer matches the active task and dispatch",
+    };
+  }
+  if (
+    !input.hints.worktreeExists ||
+    !input.hints.currentHeadSha ||
+    input.hints.baseIsAncestor !== true ||
+    input.hints.trackedClean !== true
+  ) {
+    return {
+      ...input.base,
+      ok: false,
+      message:
+        "intervention recovery requires an existing clean worktree with verified base ancestry",
+    };
+  }
+  if (intervention.headSha !== input.hints.currentHeadSha) {
+    return {
+      ...input.base,
+      ok: false,
+      message:
+        `worktree HEAD changed after intervention: expected ` +
+        `${intervention.headSha ?? "unreadable"}, got ${input.hints.currentHeadSha}`,
+    };
+  }
+
+  if (intervention.kind === "escalation") {
+    if (!input.acknowledgeEscalation) {
+      return {
+        ...input.base,
+        ok: false,
+        message:
+          "escalation not acknowledged; use --acknowledge-escalation with --execute after review",
+      };
+    }
+    const status =
+      intervention.role === "auditor"
+        ? input.hints.auditTaskStatus
+        : input.hints.implementTaskStatus;
+    if (status?.toLowerCase() !== "completed") {
+      return {
+        ...input.base,
+        ok: false,
+        message: `escalated task is not completed (Orca status=${status ?? "unavailable"})`,
+      };
+    }
+  } else {
+    const reply = input.decisionReply?.trim();
+    if (!reply) {
+      return {
+        ...input.base,
+        ok: false,
+        message:
+          "decision gate has no human reply; use --reply <text> with --execute",
+      };
+    }
+    if (!intervention.messageId) {
+      return {
+        ...input.base,
+        ok: false,
+        message: "decision gate has no message id and cannot be replied to safely",
+      };
+    }
+    if (!input.job.controller_terminal_handle) {
+      return {
+        ...input.base,
+        ok: false,
+        message: "decision gate has no controller terminal provenance",
+      };
+    }
+    const orcaCli = requireOrcaCli(input.config);
+    const replied = orcaJson(orcaCli, [
+      "orchestration",
+      "reply",
+      "--id",
+      intervention.messageId,
+      "--body",
+      reply,
+      "--from",
+      input.job.controller_terminal_handle,
+    ]);
+    if (!replied.ok) {
+      return {
+        ...input.base,
+        ok: false,
+        message: `decision gate reply failed: ${replied.error ?? "unknown Orca error"}`,
+      };
+    }
+  }
+
+  let nextState: JobState = intervention.sourceState;
+  if (intervention.kind === "escalation") {
+    if (intervention.sourceState === "implementing") {
+      if (input.hints.hasCommitsSinceBase !== true) {
+        return {
+          ...input.base,
+          ok: false,
+          message: "completed implementation escalation has no commit since base",
+        };
+      }
+      nextState = "awaiting_audit";
+    } else if (intervention.sourceState === "reworking") {
+      if (!input.job.audit_head_sha) {
+        return {
+          ...input.base,
+          ok: false,
+          message: "completed rework escalation has no audited HEAD provenance",
+        };
+      }
+      const ancestry = checkAncestor(
+        input.job.worktree_path!,
+        input.job.audit_head_sha,
+        input.hints.currentHeadSha,
+      );
+      if (!ancestry.ok || !ancestry.isAncestor) {
+        return {
+          ...input.base,
+          ok: false,
+          message: ancestry.ok
+            ? "rework HEAD is not a descendant of the audited HEAD"
+            : `cannot verify rework ancestry: ${ancestry.error}`,
+        };
+      }
+      if (
+        input.hints.currentHeadSha === input.job.audit_head_sha &&
+        (input.hints.auditArtifactStatus !== "current" ||
+          input.hints.auditResultReady !== true)
+      ) {
+        return {
+          ...input.base,
+          ok: false,
+          message:
+            "same-HEAD rework escalation lacks the current audited artifact",
+        };
+      }
+      nextState = "awaiting_audit";
+    } else if (
+      input.job.audit_head_sha !== input.hints.currentHeadSha ||
+      input.hints.auditArtifactStatus !== "current" ||
+      input.hints.auditResultReady !== true
+    ) {
+      return {
+        ...input.base,
+        ok: false,
+        message:
+          "completed audit escalation lacks a current same-HEAD audit artifact",
+      };
+    }
+  }
+
+  const updated = input.ledger.updateJobIf(input.job.id, input.job.revision, {
+    state: nextState,
+    head_sha: input.hints.currentHeadSha,
+    last_error: null,
+    intervention_resolved_at: new Date().toISOString(),
+  });
+  if (!updated) {
+    return {
+      ...input.base,
+      ok: false,
+      message: "job changed before intervention resolution; re-run dry-run",
+    };
+  }
+  return {
+    ...input.base,
+    ok: true,
+    message:
+      intervention.kind === "decision_gate"
+        ? `decision sent; restored ${nextState}`
+        : `escalation acknowledged; advanced to ${nextState}`,
+    details: {
+      ...input.base.details,
+      intervention,
+      nextState,
+      headSha: input.hints.currentHeadSha,
+    },
+    executed: true,
+  };
+}
+
 function executeAction(
   action: RecoverAction,
   opts: {
@@ -481,6 +726,15 @@ function gatherHints(
 ): ReconcileHints {
   const hints: ReconcileHints = {};
   if (!job) return hints;
+
+  if (project) {
+    const issue = viewIssue(project, job.issue_number);
+    if (issue.ok && issue.issue) {
+      hints.issueState = issue.issue.state;
+    } else {
+      hints.issueStateError = issue.error ?? "issue state unavailable";
+    }
+  }
 
   if (job.worktree_path) {
     hints.worktreeExists = existsSync(job.worktree_path);

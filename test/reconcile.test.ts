@@ -151,6 +151,54 @@ test("blocked stays blocked", () => {
   assert.equal(a.kind, "blocked");
 });
 
+test("a closed active issue blocks and requires explicit cancellation", () => {
+  const a = reconcileJob(job({ state: "awaiting_audit" }), {
+    issueState: "CLOSED",
+    baseIsAncestor: true,
+  });
+  assert.equal(a.kind, "blocked");
+  assert.match(a.reason, /explicit cancel required/);
+  assert.equal(a.kind === "blocked" ? a.persist : false, true);
+});
+
+test("a merged PR can be recorded even when GitHub already closed its issue", () => {
+  const a = reconcileJob(job({ state: "awaiting_merge" }), {
+    issueState: "CLOSED",
+    prMerged: true,
+  });
+  assert.equal(a.kind, "wait_merge");
+});
+
+test("a structured escalation requires explicit intervention recovery", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-1",
+      implementer_dispatch_id: "dispatch-1",
+      intervention_json: JSON.stringify({
+        version: 1,
+        kind: "escalation",
+        sourceState: "implementing",
+        role: "implementer",
+        messageId: "message-1",
+        taskId: "task-1",
+        dispatchId: "dispatch-1",
+        headSha: "head-1",
+        body: "confirm scope",
+        payload: null,
+        observedAt: "2026-07-29T00:00:00Z",
+      }),
+    }),
+    { baseIsAncestor: true },
+  );
+  assert.equal(a.kind, "resolve_intervention");
+  assert.equal(
+    a.kind === "resolve_intervention" ? a.intervention : null,
+    "escalation",
+  );
+  assert.equal(classifyRecoverExecution(a, "blocked"), "explicit_recovery");
+});
+
 test("completed implementation without commits requires an explicit retry", () => {
   const a = reconcileJob(
     job({

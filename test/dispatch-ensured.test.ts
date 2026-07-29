@@ -8,10 +8,7 @@ import {
   waitWorkerDone,
 } from "../src/orca-runtime.js";
 
-const EXPECTED_DECISION_GATE_REPLY =
-  "Continue within the assigned task, scope, and restrictions. Use your best judgment and choose the safest minimal approach.";
-
-test("replies to decision_gate before waiting for the same task worker_done", () => {
+test("surfaces decision_gate without replying automatically", () => {
   const fake = makeFakeOrca("decision-then-done");
   const result = waitWorkerDone(fake.command, {
     controllerHandle: "controller-1",
@@ -20,14 +17,14 @@ test("replies to decision_gate before waiting for the same task worker_done", ()
     timeoutMs: 3_000,
   });
 
-  assert.deepEqual(result, {
-    ok: true,
-    message: {
-      type: "worker_done",
-      taskId: "task-1",
-      dispatchId: "dispatch-1",
-    },
-  });
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(
+    result.error,
+    "worker requested a human decision (message gate-1)",
+  );
+  assert.equal(result.intervention?.kind, "decision_gate");
+  assert.equal(result.intervention?.messageId, "gate-1");
   const lifecycleCalls = fake.calls().filter(
     (args) =>
       args[0] === "orchestration" &&
@@ -35,18 +32,8 @@ test("replies to decision_gate before waiting for the same task worker_done", ()
   );
   assert.deepEqual(
     lifecycleCalls.map((args) => args[1]),
-    ["check", "reply", "check"],
+    ["check"],
   );
-  assert.deepEqual(lifecycleCalls[1], [
-    "orchestration",
-    "reply",
-    "--id",
-    "gate-1",
-    "--body",
-    EXPECTED_DECISION_GATE_REPLY,
-    "--from",
-    "controller-1",
-  ]);
 });
 
 test("fails decision_gate without a top-level message id", () => {
@@ -87,7 +74,7 @@ test("fails decision_gate without a top-level message id", () => {
   );
 });
 
-test("fails immediately when decision_gate reply fails", () => {
+test("does not attempt a reply when a decision_gate arrives", () => {
   const fake = makeFakeOrca("decision-reply-fails");
   const result = waitWorkerDone(fake.command, {
     controllerHandle: "controller-1",
@@ -100,7 +87,7 @@ test("fails immediately when decision_gate reply fails", () => {
   if (result.ok) return;
   assert.equal(
     result.error,
-    "decision_gate reply failed for task task-1 (message gate-1): reply unavailable",
+    "worker requested a human decision (message gate-1)",
   );
   assert.deepEqual(result.message, {
     id: "gate-1",
@@ -111,10 +98,24 @@ test("fails immediately when decision_gate reply fails", () => {
   assert.equal(
     fake.calls().filter(
       (args) =>
-        args[0] === "orchestration" && args[1] === "check",
+        args[0] === "orchestration" && args[1] === "reply",
     ).length,
-    1,
+    0,
   );
+});
+
+test("an exact worker_done wins over an older escalation in the same inbox batch", () => {
+  const fake = makeFakeOrca("escalation-and-done");
+  const result = waitWorkerDone(fake.command, {
+    controllerHandle: "controller-1",
+    taskId: "task-1",
+    dispatchId: "dispatch-1",
+    timeoutMs: 1_000,
+  });
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.message.type, "worker_done");
 });
 
 test("ignores stale, malformed, conflicting, or wrong-type completion payloads", () => {
@@ -540,6 +541,11 @@ if (key === "terminal wait") {
     dispatchId: "dispatch-1",
     payload: { id: "payload-gate-1" }
   }] } }));
+} else if (key === "orchestration check" && mode === "escalation-and-done") {
+  console.log(JSON.stringify({ ok: true, result: { messages: [
+    { id: "escalation-1", type: "escalation", taskId: "task-1", dispatchId: "dispatch-1" },
+    { type: "worker_done", taskId: "task-1", dispatchId: "dispatch-1" }
+  ] } }));
 } else if (key === "orchestration check" && mode === "stale-string-then-done") {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));

@@ -757,6 +757,15 @@ function runAuditPhase(
         if (!updateCurrentJob({
           state: "blocked",
           last_error: done.error,
+          intervention_json: done.intervention
+            ? JSON.stringify({
+                ...done.intervention,
+                sourceState: "auditing",
+                role: "auditor",
+                headSha,
+              })
+            : null,
+          intervention_resolved_at: null,
         })) {
           return jobChangedWhileWaiting();
         }
@@ -847,6 +856,8 @@ function runAuditPhase(
       dispatch_attempt: 0,
       dispatch_probe_pending: 0,
       last_error: null,
+      intervention_json: null,
+      intervention_resolved_at: null,
     })) {
       return jobChangedWhileWaiting();
     }
@@ -920,10 +931,24 @@ function runReworkPhase(
     if (updated) job = updated;
     return updated;
   };
-  const blockRework = (error: string): AuditOnceResult => {
+  const blockRework = (
+    error: string,
+    intervention?: NonNullable<
+      Extract<ReturnType<typeof waitWorkerDone>, { ok: false }>["intervention"]
+    >,
+  ): AuditOnceResult => {
     if (!updateCurrentJob({
       state: "blocked",
       last_error: error,
+      intervention_json: intervention
+        ? JSON.stringify({
+            ...intervention,
+            sourceState: "reworking",
+            role: "implementer",
+            headSha: revParse(worktreePath, "HEAD"),
+          })
+        : null,
+      intervention_resolved_at: null,
     })) {
       return jobChangedWhileWaiting();
     }
@@ -1009,6 +1034,8 @@ function runReworkPhase(
       state: "awaiting_audit",
       head_sha: completion.headSha,
       last_error: null,
+      intervention_json: null,
+      intervention_resolved_at: null,
       // force new audit task next
       auditor_task_id: null,
       auditor_dispatch_id: null,
@@ -1322,7 +1349,10 @@ function runReworkPhase(
   job = current;
   if (!done.ok) {
     if (done.escalated) {
-      return blockRework(done.error);
+      return blockRework(done.error, done.intervention);
+    }
+    if (done.intervention) {
+      return blockRework(done.error, done.intervention);
     }
     const recovered = inspectReworkCompletion();
     if (recovered.ok) {

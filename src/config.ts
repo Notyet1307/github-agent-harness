@@ -12,6 +12,7 @@ import type {
   AgentProfile,
   HarnessConfig,
   MergePolicy,
+  NotificationConfig,
   ProjectConfig,
 } from "./types.js";
 
@@ -135,6 +136,7 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   data.maxConcurrentTotal = data.maxConcurrentTotal ?? 1;
   data.pollIntervalSeconds = data.pollIntervalSeconds ?? 120;
   data.mergePolicy = normalizeMergePolicy(data.mergePolicy);
+  data.notifications = normalizeNotifications(data.notifications);
 
   data.agentProfiles = normalizeProfiles(data.agentProfiles);
   data.activeProfiles = data.activeProfiles ?? {
@@ -154,6 +156,67 @@ export function loadConfig(path = defaultConfigPath()): HarnessConfig {
   }
 
   return data;
+}
+
+function normalizeNotifications(raw: unknown): NotificationConfig {
+  if (raw === undefined) {
+    return {
+      enabled: false,
+      command: [],
+      timeoutSeconds: 30,
+      reminderMinutes: [0, 30, 120],
+      maxAttemptsPerReminder: 3,
+    };
+  }
+  if (!raw || typeof raw !== "object") {
+    throw new Error("notifications must be an object");
+  }
+  const value = raw as Partial<NotificationConfig>;
+  const enabled = value.enabled ?? false;
+  const command = value.command ?? [];
+  const timeoutSeconds = value.timeoutSeconds ?? 30;
+  const reminderMinutes = value.reminderMinutes ?? [0, 30, 120];
+  const maxAttemptsPerReminder = value.maxAttemptsPerReminder ?? 3;
+  if (typeof enabled !== "boolean") {
+    throw new Error("notifications.enabled must be boolean");
+  }
+  if (
+    !Array.isArray(command) ||
+    command.some((part) => typeof part !== "string" || part.length === 0) ||
+    (enabled && command.length === 0)
+  ) {
+    throw new Error(
+      "notifications.command must be a non-empty argv string array when enabled",
+    );
+  }
+  if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 300) {
+    throw new Error("notifications.timeoutSeconds must be an integer from 1 to 300");
+  }
+  if (
+    !Array.isArray(reminderMinutes) ||
+    reminderMinutes.length === 0 ||
+    reminderMinutes.some(
+      (minute) => !Number.isSafeInteger(minute) || minute < 0,
+    )
+  ) {
+    throw new Error("notifications.reminderMinutes must be non-negative integers");
+  }
+  if (
+    !Number.isSafeInteger(maxAttemptsPerReminder) ||
+    maxAttemptsPerReminder < 1 ||
+    maxAttemptsPerReminder > 10
+  ) {
+    throw new Error(
+      "notifications.maxAttemptsPerReminder must be an integer from 1 to 10",
+    );
+  }
+  return {
+    enabled,
+    command: [...command],
+    timeoutSeconds,
+    reminderMinutes: [...new Set(reminderMinutes)].sort((a, b) => a - b),
+    maxAttemptsPerReminder,
+  };
 }
 
 

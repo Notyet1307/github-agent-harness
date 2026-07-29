@@ -37,6 +37,15 @@ export type MergePolicy =
   | { mode: "wait"; autoMerge: false }
   | { mode: "auto"; autoMerge: true };
 
+export type NotificationConfig = {
+  enabled: boolean;
+  /** Executed directly as argv; the rendered notification is passed on stdin. */
+  command: string[];
+  timeoutSeconds: number;
+  reminderMinutes: number[];
+  maxAttemptsPerReminder: number;
+};
+
 /** Stable role in the pipeline — not a product brand. */
 export type AgentRole = "implementer" | "auditor";
 
@@ -72,6 +81,7 @@ export type HarnessConfig = {
   /** Minutes to wait for auditor worker_done (M3). */
   auditTimeoutMinutes: number;
   mergePolicy: MergePolicy;
+  notifications: NotificationConfig;
   orca: {
     cliPath: string;
     cliPathFallback: string;
@@ -207,10 +217,29 @@ export type Job = {
   pr_url: string | null;
   merged_at: string | null;
   last_error: string | null;
+  /** Structured human intervention captured from an Orca worker message. */
+  intervention_json?: string | null;
+  /** Set only after a human explicitly acknowledges or replies to it. */
+  intervention_resolved_at?: string | null;
   head_sha: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
+};
+
+export type WorkerIntervention = {
+  version: 1;
+  kind: "escalation" | "decision_gate";
+  sourceState: "implementing" | "auditing" | "reworking";
+  role: AgentRole;
+  messageId: string | null;
+  taskId: string;
+  dispatchId: string | null;
+  /** Worktree HEAD observed when the intervention blocked the controller. */
+  headSha: string | null;
+  body: string | null;
+  payload: unknown;
+  observedAt: string;
 };
 
 export type AuditFinding = {

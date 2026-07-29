@@ -1,5 +1,10 @@
 import { basename } from "node:path";
-import type { AgentProfile, HarnessConfig, RepoConfig } from "./types.js";
+import type {
+  AgentProfile,
+  HarnessConfig,
+  RepoConfig,
+  WorkerIntervention,
+} from "./types.js";
 import { orcaJson, unwrapResult } from "./orca.js";
 import { execFile } from "./exec.js";
 import { HARNESS_ROOT } from "./config.js";
@@ -36,9 +41,6 @@ export type OrchestrationMessage = {
   subject?: string;
   [key: string]: unknown;
 };
-
-const DECISION_GATE_REPLY =
-  "Continue within the assigned task, scope, and restrictions. Use your best judgment and choose the safest minimal approach.";
 
 type DispatchAttemptFailure = {
   ok: false;
@@ -1121,6 +1123,7 @@ export function waitWorkerDone(
   error: string;
   escalated?: boolean;
   message?: OrchestrationMessage;
+  intervention?: Omit<WorkerIntervention, "sourceState" | "role">;
 } {
   const deadline = Date.now() + input.timeoutMs;
   while (Date.now() < deadline) {
@@ -1145,6 +1148,38 @@ export function waitWorkerDone(
     );
 
     const messages = extractMessages(r.data);
+    // A worker may escalate and then finish before the controller checks its
+    // inbox. Prefer an exact completion from the same batch so an older
+    // escalation cannot permanently shadow the later worker_done.
+    for (const msg of messages) {
+      const type = (
+        asNonEmptyString(msg.type) ??
+        asNonEmptyString(msg.messageType) ??
+        ""
+      ).toLowerCase();
+      if (type !== "worker_done") continue;
+      const payload = parseMessagePayload(msg.payload);
+      const messageTaskId = asNonEmptyString(msg.taskId);
+      const payloadTaskId = asNonEmptyString(payload.taskId);
+      const messageDispatchId = asNonEmptyString(msg.dispatchId);
+      const payloadDispatchId = asNonEmptyString(payload.dispatchId);
+      if (
+        (messageTaskId && payloadTaskId && messageTaskId !== payloadTaskId) ||
+        (messageDispatchId &&
+          payloadDispatchId &&
+          messageDispatchId !== payloadDispatchId)
+      ) {
+        continue;
+      }
+      const taskId = messageTaskId ?? payloadTaskId;
+      const dispatchId = messageDispatchId ?? payloadDispatchId;
+      if (
+        taskId === input.taskId &&
+        (input.dispatchId === null || dispatchId === input.dispatchId)
+      ) {
+        return { ok: true, message: msg };
+      }
+    }
     for (const msg of messages) {
       const type = (
         asNonEmptyString(msg.type) ??
@@ -1173,15 +1208,22 @@ export function waitWorkerDone(
       const dispatchMatches =
         input.dispatchId === null || dispatchId === input.dispatchId;
 
-      if (type === "escalation" && taskMatches) {
+      if (type === "escalation" && taskMatches && dispatchMatches) {
         return {
           ok: false,
           error: "worker sent escalation",
           escalated: true,
           message: msg,
+          intervention: messageIntervention(
+            "escalation",
+            msg,
+            input.taskId,
+            input.dispatchId,
+            payload,
+          ),
         };
       }
-      if (type === "decision_gate" && taskMatches) {
+      if (type === "decision_gate" && taskMatches && dispatchMatches) {
         const gateId = asNonEmptyString(msg.id);
         if (!gateId) {
           return {
@@ -1190,27 +1232,18 @@ export function waitWorkerDone(
             message: msg,
           };
         }
-        const reply = orcaJson(orcaCli, [
-          "orchestration",
-          "reply",
-          "--id",
-          gateId,
-          "--body",
-          DECISION_GATE_REPLY,
-          "--from",
-          input.controllerHandle,
-        ]);
-        if (!reply.ok) {
-          return {
-            ok: false,
-            error: `decision_gate reply failed for task ${input.taskId} (message ${gateId}): ${reply.error ?? "unknown Orca error"}`,
-            message: msg,
-          };
-        }
-        input.onTick?.(
-          `replied to decision_gate ${gateId} for task ${input.taskId}; continuing to wait`,
-        );
-        continue;
+        return {
+          ok: false,
+          error: `worker requested a human decision (message ${gateId})`,
+          message: msg,
+          intervention: messageIntervention(
+            "decision_gate",
+            msg,
+            input.taskId,
+            input.dispatchId,
+            payload,
+          ),
+        };
       }
       if (type === "worker_done" && taskMatches && dispatchMatches) {
         return { ok: true, message: msg };
@@ -1224,6 +1257,31 @@ export function waitWorkerDone(
   return {
     ok: false,
     error: `timeout waiting for worker_done on task ${input.taskId}`,
+  };
+}
+
+function messageIntervention(
+  kind: "escalation" | "decision_gate",
+  message: OrchestrationMessage,
+  taskId: string,
+  dispatchId: string | null,
+  payload: Record<string, unknown>,
+): Omit<WorkerIntervention, "sourceState" | "role"> {
+  return {
+    version: 1,
+    kind,
+    messageId: asNonEmptyString(message.id),
+    taskId,
+    dispatchId,
+    headSha: null,
+    body:
+      asNonEmptyString(message.body) ??
+      asNonEmptyString(message.subject) ??
+      asNonEmptyString(payload.body) ??
+      asNonEmptyString(payload.message) ??
+      null,
+    payload: message.payload ?? null,
+    observedAt: new Date().toISOString(),
   };
 }
 
