@@ -368,7 +368,8 @@ test("blocked transient push failure retries publishing with current audit evide
       audit_round: 1,
       audit_head_sha: "head",
       head_sha: "head",
-      last_error: "git push failed: authentication unavailable",
+      last_error:
+        "git push failed: fatal: unable to access 'https://github.com/owner/repo.git/': Could not resolve host: github.com",
     }),
     {
       auditArtifactStatus: "current",
@@ -381,6 +382,30 @@ test("blocked transient push failure retries publishing with current audit evide
   );
 
   assert.equal(action.kind, "publish_once");
+});
+
+test("blocked permanent push failure does not retry publishing", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error:
+        "git push failed: remote: Permission to owner/repo.git denied to bot.",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "blocked");
 });
 
 test("blocked malformed audit stays blocked without completed provenance", () => {

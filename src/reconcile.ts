@@ -1,4 +1,5 @@
 import type { AuditArtifactInspection } from "./audit-gate.js";
+import { isRetryablePushFailure } from "./push-failure.js";
 import type { Job, JobState } from "./types.js";
 
 export const IMPLEMENT_NO_COMMITS_ERROR =
@@ -177,7 +178,7 @@ export function reconcileJob(
         };
       }
       if (
-        job.last_error?.startsWith("git push failed:") &&
+        isRetryablePushFailure(job.last_error) &&
         job.auditor_task_id &&
         job.audit_round > 0 &&
         job.audit_head_sha === hints.currentHeadSha &&

@@ -132,7 +132,6 @@ export function runRecoveryCycle(options: {
     if (job?.state === "blocked" && action.kind === "publish_once") {
       job = ledger.updateJob(job.id, {
         state: "audit_passed",
-        last_error: null,
       });
     }
     if (job?.state === "blocked" && action.kind === "audit_once") {
