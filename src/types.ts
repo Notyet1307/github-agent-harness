@@ -220,8 +220,17 @@ export type AuditFinding = {
   blocking?: boolean;
 };
 
+/** Why a completed audit could not establish a merge-safe conclusion. */
+export type AuditUncertainReason =
+  | "reviewer_infrastructure"
+  | "evidence_incomplete"
+  | "snapshot_mismatch"
+  | "other";
+
 export type AuditResult = {
   status: "pass" | "fail" | "uncertain";
+  /** Required for newly emitted uncertain results; absent remains fail-closed for legacy artifacts. */
+  uncertain_reason?: AuditUncertainReason;
   base_sha: string;
   head_sha: string;
   standards: {

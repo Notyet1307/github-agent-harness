@@ -123,6 +123,33 @@ test("auditor contract requires finding objects instead of bare strings", () => 
   }
 });
 
+test("auditor contract classifies retryable reviewer infrastructure uncertainty", () => {
+  const spec = renderAuditorSpec({
+    repo: "owner/repo",
+    issueNumber: 7,
+    issueUrl: "https://example.test/issues/7",
+    baseSha: "base-sha",
+    headSha: "head-sha",
+    branch: "issue-7",
+    worktreePath: "/tmp/issue-7",
+    profileId: "pi-reviewer",
+    orcaAgent: "pi",
+    invokeHint: "Invoke the audit skill.",
+    auditRound: 1,
+    resultPath: "/tmp/issue-7/.harness/audit-result.json",
+  });
+  const skill = readFileSync(
+    join(process.cwd(), "pi/auditor/skills/matt-code-review-pi/SKILL.md"),
+    "utf8",
+  );
+
+  for (const contract of [spec, skill]) {
+    assert.match(contract, /uncertain_reason/);
+    assert.match(contract, /reviewer_infrastructure/);
+    assert.match(contract, /never merge|never permits a merge/i);
+  }
+});
+
 test("auditor subagents do not write debug artifacts into the business worktree", () => {
   const skill = readFileSync(
     join(
