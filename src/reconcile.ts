@@ -7,6 +7,16 @@ export const IMPLEMENT_NO_COMMITS_ERROR =
 export const REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR =
   "rework produced no commits after audited HEAD";
 
+export function isTimedOutReworkWithoutNewCommit(
+  job: Pick<Job, "audit_round" | "last_error">,
+): boolean {
+  return Boolean(
+    job.audit_round > 0 &&
+      job.last_error?.startsWith("timeout waiting for worker_done") &&
+      job.last_error.includes(REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR),
+  );
+}
+
 /**
  * Pure recovery routing for M5.
  * Controllers map each non-terminal state to the next safe command.
@@ -22,6 +32,7 @@ export type RecoverAction =
       reason: string;
       recovery?:
         | "retry_malformed_result"
+        | "retry_stuck_rework"
         | "retry_validation_only_rework"
         | "retry_stale_result";
     }
@@ -212,6 +223,27 @@ export function reconcileJob(
       }
       if (
         job.implementer_task_id &&
+        job.implementer_dispatch_id &&
+        isTimedOutReworkWithoutNewCommit(job) &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        job.head_sha === hints.currentHeadSha &&
+        hints.worktreeExists === true &&
+        hints.hasCommitsSinceBase === true &&
+        hints.auditArtifactStatus === "current" &&
+        hints.auditResultReady === true &&
+        hints.implementTaskStatus?.toLowerCase() === "failed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "timed-out zero-commit rework has a failed stale task; explicit recovery may redispatch the same issue",
+          recovery: "retry_stuck_rework",
+        };
+      }
+      if (
+        job.implementer_task_id &&
         job.audit_round > 0 &&
         job.last_error === REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR &&
         job.audit_head_sha === hints.currentHeadSha &&
@@ -390,6 +422,7 @@ export function recoveryInvariants(): string[] {
     "never create a second PR for the same head branch if one exists",
     "never advance work whose HEAD does not descend from the pinned base",
     "never reuse a malformed audit result; recover only through a fresh audit",
+    "never retry timed-out rework before the failed task and audited fixed point are revalidated",
     "never skip audit (audit_passed/publishing only after audit gate)",
     "never pick next issue before merged/cancelled",
   ];

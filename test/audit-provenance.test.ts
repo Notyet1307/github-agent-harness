@@ -18,6 +18,7 @@ import { recover } from "../src/recover.js";
 import { Ledger } from "../src/ledger.js";
 import { acquireLock } from "../src/lock.js";
 import { publishOnce } from "../src/publisher.js";
+import { REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR } from "../src/reconcile.js";
 import type { AuditResult } from "../src/types.js";
 
 type AuditFixture = {
@@ -51,6 +52,9 @@ type AuditFixtureMode =
   | "rework-retry-drift"
   | "rework-dispatch-lock-wait"
   | "rework-stale-terminal"
+  | "rework-stuck-retry"
+  | "rework-stuck-artifact-race"
+  | "rework-stuck-task-race"
   | "audit-retry"
   | "audit-retry-lock-wait"
   | "audit-retry-artifact-race"
@@ -1269,6 +1273,129 @@ test("recover explicitly re-audits validation-only rework without a new commit",
   );
 });
 
+test("recover explicitly redispatches a timed-out rework after its stale task fails", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-stuck-retry",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markTimedOutReworkBlocked(fixture);
+
+  const dryRun = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: true,
+  });
+  assert.equal(dryRun.action.kind, "audit_once");
+  if (dryRun.action.kind === "audit_once") {
+    assert.equal(dryRun.action.recovery, "retry_stuck_rework");
+  }
+  assert.equal(dryRun.executed, false);
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.ok, true, recovered.message);
+  assert.equal(recovered.action.kind, "audit_once");
+  if (recovered.action.kind === "audit_once") {
+    assert.equal(recovered.action.recovery, "retry_stuck_rework");
+  }
+  const verified = new Ledger(fixture.ledgerPath);
+  const job = verified.getJob("job-audit");
+  assert.equal(job?.state, "audit_passed");
+  assert.equal(job?.audit_round, 2);
+  assert.equal(job?.implementer_task_id, "task-rework-new");
+  assert.equal(job?.implementer_dispatch_id, "dispatch-rework-new");
+  assert.equal(job?.auditor_task_id, "task-audit-new");
+  assert.notEqual(job?.head_sha, fixture.headSha);
+  verified.close();
+
+  const taskCreates = readCalls(fixture.callsPath).filter(
+    (args) => args[0] === "orchestration" && args[1] === "task-create",
+  );
+  assert.equal(taskCreates.length, 2);
+  assert.match(taskCreates[0]!.join(" "), /wrong behavior/);
+});
+
+test("timed-out rework recovery rechecks that the stale task is still failed", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-stuck-task-race",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markTimedOutReworkBlocked(fixture);
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.action.kind, "blocked");
+  assert.equal(recovered.ok, false);
+  assert.equal(
+    (recovered.details?.hints as { implementTaskStatus?: string } | undefined)
+      ?.implementTaskStatus,
+    "working",
+  );
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.implementer_task_id, "task-rework");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
+test("timed-out rework recovery rechecks the audited artifact before dispatch", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-stuck-artifact-race",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markTimedOutReworkBlocked(fixture);
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.action.kind, "blocked");
+  assert.equal(recovered.ok, false);
+  assert.equal(
+    (recovered.details?.hints as { auditArtifactStatus?: string } | undefined)
+      ?.auditArtifactStatus,
+    "malformed",
+  );
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "blocked");
+  assert.equal(verified.getJob("job-audit")?.implementer_task_id, "task-rework");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).some(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ),
+    false,
+  );
+});
+
 test("malformed audit recovery stops when the artifact changes after planning", (t) => {
   const fixture = createAuditFixture(
     (baseSha, headSha) =>
@@ -1368,6 +1495,10 @@ const mode = readFileSync(join(dir, "mode"), "utf8");
 const reworkMode = mode.startsWith("rework-");
 const auditRetryMode = mode.startsWith("audit-retry");
 const auditInfrastructureRetryMode = mode === "audit-infra-retry";
+const stuckReworkRetryMode =
+  mode === "rework-stuck-retry" ||
+  mode === "rework-stuck-artifact-race" ||
+  mode === "rework-stuck-task-race";
 const freshAuditMode = auditRetryMode || auditInfrastructureRetryMode;
 const statePath = join(dir, "state.json");
 const state = JSON.parse(readFileSync(statePath, "utf8"));
@@ -1451,7 +1582,7 @@ if (args[0] === "status") {
   }
   console.log(JSON.stringify({ ok: true, result: { terminal: {
     tail:
-      mode === "rework-stale-terminal"
+      mode === "rework-stale-terminal" || stuckReworkRetryMode
         ? state.tasks === 0
           ? []
           : [state.tasks === 1
@@ -1472,6 +1603,15 @@ if (args[0] === "status") {
     terminal: { title: "agent", preview: "" }
   } }));
 } else if (key === "orchestration task-list") {
+  if (mode === "rework-stuck-artifact-race") {
+    writeFileSync(
+      ${JSON.stringify(join(worktree, ".harness", "audit-result.json"))},
+      "{}"
+    );
+  }
+  if (mode === "rework-stuck-task-race") {
+    writeFileSync(join(dir, "mode"), "rework-stuck-task-live");
+  }
   if (mode === "audit-retry-artifact-race") {
     writeFileSync(
       ${JSON.stringify(join(worktree, ".harness", "audit-result.json"))},
@@ -1500,7 +1640,11 @@ if (args[0] === "status") {
       {
         id: "task-rework",
         status:
-          mode === "rework-late-failed"
+          mode === "rework-stuck-task-live"
+            ? "working"
+            : stuckReworkRetryMode
+            ? "failed"
+            : mode === "rework-late-failed"
             ? state.checks === 0 ? "working" : "failed"
             : mode === "rework-failed-commit" ||
           mode === "rework-pending-failed"
@@ -1516,14 +1660,17 @@ if (args[0] === "status") {
   writeFileSync(statePath, JSON.stringify(state));
   console.log(JSON.stringify({ ok: true, result: {
     taskId:
-      mode === "rework-stale-terminal"
+      mode === "rework-stale-terminal" || stuckReworkRetryMode
         ? state.tasks === 1 ? "task-rework-new" : "task-audit-new"
         : mode === "rework-retry-drift"
           ? "task-rework-" + state.tasks
           : "task-audit-new"
   } }));
 } else if (key === "orchestration dispatch") {
-  if (mode === "rework-stale-terminal" && state.tasks === 1) {
+  if (
+    (mode === "rework-stale-terminal" || stuckReworkRetryMode) &&
+    state.tasks === 1
+  ) {
     console.log(JSON.stringify({ ok: true, result: {
       dispatchId: "dispatch-rework-new"
     } }));
@@ -1615,7 +1762,7 @@ if (args[0] === "status") {
     }] } }));
     process.exit(0);
   }
-  if (mode === "rework-stale-terminal") {
+  if (mode === "rework-stale-terminal" || stuckReworkRetryMode) {
     if (state.tasks === 1 && !state.mutationApplied) {
       writeFileSync(${JSON.stringify(join(worktree, "value.txt"))}, "rebound fix\\n");
       execFileSync(
@@ -1851,6 +1998,18 @@ function markReworking(
     implementer_task_id: withTask ? "task-rework" : null,
     implementer_dispatch_id: withTask ? "dispatch-rework" : null,
     controller_terminal_handle: "controller-1",
+  });
+  ledger.close();
+}
+
+function markTimedOutReworkBlocked(fixture: AuditFixture): void {
+  markReworking(fixture);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error:
+      "timeout waiting for worker_done on task task-rework; " +
+      REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
   });
   ledger.close();
 }

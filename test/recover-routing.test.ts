@@ -15,6 +15,7 @@ import { Ledger } from "../src/ledger.js";
 import { testProject } from "./support.js";
 import {
   IMPLEMENT_NO_COMMITS_ERROR,
+  REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
   reconcileJob,
 } from "../src/reconcile.js";
 import { recover } from "../src/recover.js";
@@ -408,6 +409,45 @@ repositories:
     last_error: IMPLEMENT_NO_COMMITS_ERROR,
   });
   ledger.close();
+
+  const reworkLedger = new Ledger(ledgerPath);
+  reworkLedger.updateJob("job-retry", {
+    audit_round: 1,
+    audit_head_sha: baseSha,
+    head_sha: baseSha,
+    last_error:
+      "timeout waiting for worker_done on task task-old; " +
+      REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+  });
+  reworkLedger.close();
+
+  const rejectedReworkIdentity = runOnce({
+    configPath,
+    ledgerPath,
+    lockPath: join(dir, "harness.lock"),
+    blockedImplementationRecovery: {
+      action: "finalize",
+      jobId: "job-retry",
+      taskId: "task-old",
+      dispatchId: "dispatch-old",
+    },
+  });
+  assert.equal(rejectedReworkIdentity.ok, false);
+  assert.match(rejectedReworkIdentity.message, /changed before recovery/);
+
+  const restoreInitialRecovery = new Ledger(ledgerPath);
+  restoreInitialRecovery.updateJob("job-retry", {
+    audit_round: 0,
+    audit_head_sha: null,
+    head_sha: null,
+    state: "blocked",
+    implementer_terminal_handle: "codex-old",
+    implementer_task_id: "task-old",
+    implementer_dispatch_id: "dispatch-old",
+    dispatch_attempt: 1,
+    last_error: IMPLEMENT_NO_COMMITS_ERROR,
+  });
+  restoreInitialRecovery.close();
 
   const failed = recover({
     configPath,

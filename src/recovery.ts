@@ -17,6 +17,7 @@ import { orcaJson, requireOrcaCli, unwrapResult } from "./orca.js";
 import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   classifyRecoverExecution,
+  isTimedOutReworkWithoutNewCommit,
   reconcileJob,
   REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
   type RecoverAction,
@@ -238,6 +239,38 @@ export function runRecoveryCycle(options: {
           }
         }
       }
+      if (!recoveryError && action.recovery === "retry_stuck_rework") {
+        if (!job.worktree_path || !job.base_sha || !head) {
+          recoveryError =
+            "cannot retry timed-out rework without a readable worktree, base, and HEAD";
+        } else if (!job.implementer_task_id || !job.implementer_dispatch_id) {
+          recoveryError =
+            "cannot retry timed-out rework without the failed task and dispatch identity";
+        } else if (hints.implementTaskStatus?.toLowerCase() !== "failed") {
+          recoveryError =
+            "cannot retry timed-out rework before the stale task is confirmed failed";
+        } else if (
+          !isTimedOutReworkWithoutNewCommit(job) ||
+          job.audit_head_sha !== head ||
+          job.head_sha !== head
+        ) {
+          recoveryError =
+            "cannot retry timed-out rework without same-audited-HEAD provenance";
+        } else {
+          const artifact = inspectAuditArtifact(
+            join(job.worktree_path, ".harness", "audit-result.json"),
+            job.base_sha,
+            head,
+          );
+          const dirty = trackedDirty(job.worktree_path);
+          if (dirty) {
+            recoveryError = `cannot retry timed-out rework with tracked changes:\n${dirty}`;
+          } else if (artifact.status !== "current") {
+            recoveryError =
+              `cannot retry timed-out rework after audit artifact changed to ${artifact.status}`;
+          }
+        }
+      }
       if (recoveryError) {
         ledger.updateJob(job.id, {
           state: "blocked",
@@ -249,7 +282,20 @@ export function runRecoveryCycle(options: {
           message: recoveryError,
         };
       }
-      if (
+      if (action.recovery === "retry_stuck_rework") {
+        // Preserve the audited artifact/result for the rework prompt, but forget
+        // the terminal task identity so auditOnce can create a new rework task.
+        ledger.updateJob(job.id, {
+          state: "reworking",
+          implementer_terminal_handle: null,
+          implementer_task_id: null,
+          implementer_dispatch_id: null,
+          dispatch_attempt: 0,
+          dispatch_probe_pending: 0,
+          last_error: null,
+          head_sha: head,
+        });
+      } else if (
         action.recovery === "retry_malformed_result" ||
         action.recovery === "retry_validation_only_rework" ||
         action.recovery === "retry_stale_result"
