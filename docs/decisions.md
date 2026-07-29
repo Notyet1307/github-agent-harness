@@ -187,6 +187,7 @@ Do **not** hardcode Codex/Pi in transition logic.
 | Escalation | Always block even when valid commits exist | Explicit worker requests must not be hidden by Git fallback |
 | Implementer terminal recovery | Reuse only one connected exact role-title match; otherwise create a fresh terminal before a new or pending dispatch | Orca restarts invalidate handles, while fuzzy or ambiguous matches can target another session |
 | No-commit completion recovery | Require readable HEAD at the pinned base; preserve the worktree and redispatch only via explicit `recover --execute` | Keep partial changes without letting failed retries or `watch` create retry loops |
+| Timed-out zero-commit rework | Redispatch only through explicit `recover --execute` after the exact stale task is `failed`; require its dispatch provenance, the exact clean audited HEAD, current audit artifact, and pinned-base ancestry | Recover a dead rework worker without treating original implementation commits as rework or allowing `watch` retry loops |
 
 ## 2026-07-25 — Wayfinder Map frontier selection
 

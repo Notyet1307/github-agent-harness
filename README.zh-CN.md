@@ -140,6 +140,11 @@ pnpm harness recover --dry-run
 只有审查过计划后才执行 **recover --execute**。不要手工编辑
 **data/harness.sqlite**。
 
+如果审计后的返工 worker 超时且没有产生新提交，只有在旧任务已经失败、
+worktree 仍干净地停留在已审计提交、审计证据仍然有效时，
+`recover --dry-run` 才会提出重新派发计划。审查计划后，使用
+`recover --execute` 重试返工；`watch` 不会自动重试这种情况。
+
 ## 参考
 
 - 配置：[config/harness.yaml](config/harness.yaml)

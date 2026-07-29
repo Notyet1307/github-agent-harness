@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   IMPLEMENT_NO_COMMITS_ERROR,
+  REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+  classifyRecoverExecution,
   reconcileJob,
   recoveryInvariants,
 } from "../src/reconcile.js";
@@ -482,6 +484,102 @@ test("validation-only rework stays blocked if HEAD changed", () => {
   assert.equal(action.kind, "blocked");
 });
 
+test("timed-out zero-commit rework requires explicit recovery and a stale failed task", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-rework",
+      implementer_dispatch_id: "dispatch-rework",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error:
+        "timeout waiting for worker_done on task task-rework; " +
+        REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      currentHeadSha: "audited-head",
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      implementTaskStatus: "failed",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_stuck_rework");
+  }
+  assert.equal(classifyRecoverExecution(action, "blocked"), "explicit_recovery");
+});
+
+test("timed-out rework recovery stays blocked unless its stale task and provenance are verified", () => {
+  for (const hints of [
+    { implementTaskStatus: "working" },
+    { implementTaskStatus: "completed" },
+    { implementTaskStatus: "failed", trackedClean: false },
+    { implementTaskStatus: "failed", currentHeadSha: "different-head" },
+    {
+      implementTaskStatus: "failed",
+      auditArtifactStatus: "stale" as const,
+      auditResultReady: false,
+    },
+  ]) {
+    const action = reconcileJob(
+      job({
+        state: "blocked",
+        implementer_task_id: "task-rework",
+        implementer_dispatch_id: "dispatch-rework",
+        audit_round: 1,
+        audit_head_sha: "audited-head",
+        head_sha: "audited-head",
+        last_error:
+          "timeout waiting for worker_done on task task-rework; " +
+          REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+      }),
+      {
+        worktreeExists: true,
+        currentHeadSha: "audited-head",
+        hasCommitsSinceBase: true,
+        baseIsAncestor: true,
+        trackedClean: true,
+        auditArtifactStatus: "current",
+        auditResultReady: true,
+        ...hints,
+      },
+    );
+    assert.equal(action.kind, "blocked");
+  }
+
+  const missingDispatch = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-rework",
+      implementer_dispatch_id: null,
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error:
+        "timeout waiting for worker_done on task task-rework; " +
+        REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      currentHeadSha: "audited-head",
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      implementTaskStatus: "failed",
+    },
+  );
+  assert.equal(missingDispatch.kind, "blocked");
+});
+
 test("blocked audit wait resumes when completed evidence is ready", () => {
   const a = reconcileJob(
     job({
@@ -568,4 +666,12 @@ test("recovery invariants are documented", () => {
   assert.ok(inv.some((s) => s.includes("never create a second PR")));
   assert.ok(inv.some((s) => s.includes("never skip audit")));
   assert.ok(inv.some((s) => s.includes("descend from the pinned base")));
+  assert.ok(
+    inv.some(
+      (s) =>
+        s.includes("timed-out rework") &&
+        s.includes("failed task") &&
+        s.includes("audited fixed point"),
+    ),
+  );
 });

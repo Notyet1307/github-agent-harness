@@ -154,6 +154,12 @@ pnpm harness recover --dry-run
 Use **recover --execute** only after reviewing the plan. Do not edit
 **data/harness.sqlite** by hand.
 
+If a post-audit rework worker times out without producing a new commit,
+`recover --dry-run` proposes a redispatch only when the old task has failed,
+the worktree is still clean at the audited commit, and the audit evidence is
+still current. After reviewing that plan, use `recover --execute` to retry the
+rework. `watch` does not retry this case automatically.
+
 ## Reference
 
 - Configuration: [config/harness.yaml](config/harness.yaml)
