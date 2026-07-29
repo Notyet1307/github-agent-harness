@@ -1,5 +1,6 @@
 import type { AuditArtifactInspection } from "./audit-gate.js";
 import { isRetryablePushFailure } from "./push-failure.js";
+import { parseWorkerIntervention } from "./intervention.js";
 import type { Job, JobState } from "./types.js";
 
 export const IMPLEMENT_NO_COMMITS_ERROR =
@@ -38,6 +39,11 @@ export type RecoverAction =
     }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
+  | {
+      kind: "resolve_intervention";
+      reason: string;
+      intervention: "escalation" | "decision_gate";
+    }
   | { kind: "blocked"; reason: string; persist?: boolean }
   | { kind: "none"; reason: string };
 
@@ -50,7 +56,8 @@ export function classifyRecoverExecution(
   if (
     action.kind === "retry_implement" ||
     action.kind === "finalize_implement" ||
-    (state === "blocked" && action.kind === "audit_once")
+    (state === "blocked" && action.kind === "audit_once") ||
+    action.kind === "resolve_intervention"
   ) {
     return "explicit_recovery";
   }
@@ -95,6 +102,10 @@ export type ReconcileHints = {
   prMerged?: boolean;
   /** PR closed without merge. */
   prClosedUnmerged?: boolean;
+  /** Current GitHub issue state when the lookup succeeds. */
+  issueState?: string;
+  /** GitHub issue lookup error; informational, not itself a blocker. */
+  issueStateError?: string;
 };
 
 export function reconcileJob(
@@ -105,6 +116,22 @@ export function reconcileJob(
     return {
       kind: "none",
       reason: "no active job; safe to pick/run-once for a new issue",
+    };
+  }
+
+  const issueClosed =
+    hints.issueState != null && hints.issueState.toUpperCase() !== "OPEN";
+  if (
+    issueClosed &&
+    !(job.state === "awaiting_merge" && hints.prMerged === true)
+  ) {
+    const reason =
+      `GitHub issue ${job.repo}#${job.issue_number} state=${hints.issueState}; ` +
+      "explicit cancel required";
+    return {
+      kind: "blocked",
+      reason,
+      persist: job.state !== "blocked" || job.last_error !== reason,
     };
   }
 
@@ -142,6 +169,17 @@ export function reconcileJob(
       return { kind: "noop", reason: `terminal state ${job.state}` };
 
     case "blocked": {
+      const intervention = parseWorkerIntervention(job);
+      if (intervention && !job.intervention_resolved_at) {
+        return {
+          kind: "resolve_intervention",
+          intervention: intervention.kind,
+          reason:
+            intervention.kind === "decision_gate"
+              ? "worker is waiting for a human decision; inspect the stored request and reply explicitly"
+              : "worker escalation requires explicit human acknowledgement before its completed output can advance",
+        };
+      }
       const implementTaskStatus =
         hints.implementTaskStatus?.toLowerCase() ?? "";
       const implementationEnded = Boolean(

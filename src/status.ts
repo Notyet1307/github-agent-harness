@@ -3,6 +3,7 @@ import { Ledger } from "./ledger.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import { taskList, worktreePs } from "./orca-runtime.js";
 import { loadRuntimeConfig } from "./project.js";
+import { parseWorkerIntervention } from "./intervention.js";
 
 export function formatStatus(options: {
   configPath?: string;
@@ -50,6 +51,16 @@ export function formatStatus(options: {
       lines.push(
         `  error:     ${active.last_error ?? "-"}`,
       );
+      const intervention = parseWorkerIntervention(active);
+      if (intervention && !active.intervention_resolved_at) {
+        lines.push(
+          `  intervention: ${intervention.kind} from ${intervention.role} ` +
+            `(task ${intervention.taskId}, message ${intervention.messageId ?? "-"})`,
+        );
+        if (intervention.body) {
+          lines.push(`  request:   ${intervention.body}`);
+        }
+      }
     }
 
     lines.push("");

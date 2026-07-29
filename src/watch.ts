@@ -2,6 +2,10 @@ import { loadConfig } from "./config.js";
 import { execFile } from "./exec.js";
 import type { RecoverAction } from "./reconcile.js";
 import {
+  notifyActiveIntervention,
+  type NotificationResult,
+} from "./notification.js";
+import {
   WorkCoordinator,
   type WorkCycleResult,
 } from "./work.js";
@@ -21,6 +25,7 @@ export type WatchCyclePlan = {
 export type WatchCycleResult = {
   plan: WatchCyclePlan;
   result?: WorkCycleResult["result"];
+  notification?: NotificationResult;
   sleptSeconds: number;
 };
 
@@ -59,6 +64,12 @@ export function planWatchCycle(action: RecoverAction): WatchCyclePlan {
         step: "blocked_wait",
         action,
         reason: `blocked job holds the slot: ${action.reason}`,
+      };
+    case "resolve_intervention":
+      return {
+        step: "blocked_wait",
+        action,
+        reason: `human ${action.intervention} required: ${action.reason}`,
       };
     case "run_once":
     case "finalize_implement":
@@ -179,6 +190,7 @@ export function runWatchCycle(opts: {
   lockPath?: string;
   dryRun?: boolean;
   log: (line: string) => void;
+  notifyIntervention?: typeof notifyActiveIntervention;
 }): WatchCycleResult {
   const coordinated = opts.coordinator.cycle({
     mode: "automatic",
@@ -189,6 +201,19 @@ export function runWatchCycle(opts: {
   });
   const plan = planWatchCycle(coordinated.plan.action);
   opts.log(`plan: ${plan.step} — ${plan.reason}`);
+
+  let notification: NotificationResult | undefined;
+  if (coordinated.plan.action.kind === "resolve_intervention") {
+    notification = (opts.notifyIntervention ?? notifyActiveIntervention)({
+      configPath: opts.configPath,
+      ledgerPath: opts.ledgerPath,
+      lockPath: opts.lockPath,
+      dryRun: opts.dryRun,
+    });
+    opts.log(
+      `notification ${notification.ok ? "ok" : "fail"}: ${notification.message}`,
+    );
+  }
 
   if (coordinated.result) {
     opts.log(
@@ -201,6 +226,7 @@ export function runWatchCycle(opts: {
   return {
     plan,
     result: coordinated.result,
+    notification,
     sleptSeconds: 0,
   };
 }

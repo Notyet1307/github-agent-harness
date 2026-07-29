@@ -19,7 +19,8 @@ SQLite ledger 保证全局只有一个 in-flight job。Controller 不会直接 m
 静默跳过失败任务。默认等待人工合并；可选 auto 模式只请求 GitHub 合并已审计的 PR
 HEAD，CI 与 review 仍由 GitHub 规则决定。
 
-它目前只作为前台进程运行，不会安装后台服务，也不会删除已完成的 worktree。
+它目前只作为前台进程运行，不会安装后台服务。已合并或已取消的 worktree 只会由显式、
+默认先 dry-run 的 `cleanup` 命令删除。
 
 ## 配置
 
@@ -128,6 +129,30 @@ gh pr merge --auto --match-head-commit <audited-sha>
 GitHub 负责等待 required checks。CI 失败、requested changes、PR 被关闭或 auto-merge
 请求失败时，job 会保留供显式处理；Harness 不会自动 rework，也不会跳到下一个 issue。
 
+### 通知不值守操作者
+
+Harness 可以把未解决的 worker escalation 或 decision gate 通过 stdin 交给任意本地
+command hook。消息包含仓库与 Issue、流水线阶段与角色、精确的
+job/task/dispatch/message/HEAD、Worker 提供的选项与建议（如果有）、Harness 的保守建议，
+以及可复制的显式恢复命令。
+
+已有 Hermes Telegram pairing 时可配置：
+
+~~~yaml
+notifications:
+  enabled: true
+  command: [hermes, send, --to, telegram, --file, "-", --json]
+  timeoutSeconds: 30
+  reminderMinutes: [0, 30, 120]
+  maxAttemptsPerReminder: 3
+~~~
+
+该方式复用 Hermes 凭据，不要把 Telegram token 复制进 Harness。不值守运行 watcher 前，
+先检查 `hermes gateway status` 和 `hermes send --list telegram`。通知命令不会经过 shell；
+投递状态在 ledger 中去重，每个提醒时点只进行有限次数重试。通知失败绝不会解除 job 的
+blocked。第 1 阶段刻意保持单向：在 Telegram 中回复不会执行决定；请先审阅消息，再到
+本机运行消息中的 `harness recover --execute ...` 命令。
+
 ### 安全恢复
 
 进程中断或 job 被 block 时，先检查：
@@ -140,10 +165,51 @@ pnpm harness recover --dry-run
 只有审查过计划后才执行 **recover --execute**。不要手工编辑
 **data/harness.sqlite**。
 
+Worker 的 escalation 与 decision gate 会连同精确的 task、dispatch、message、角色和
+流水线阶段写入 ledger。Harness 不会再用通用文本自动回答 decision gate。先通过
+`status` 或 `recover --dry-run` 审阅请求，再显式处理：
+
+~~~bash
+# 审阅后，接受已经完成的 escalated worker 结果。
+pnpm harness recover --execute --acknowledge-escalation
+
+# 发送操作者的真实决定，再恢复原任务。
+pnpm harness recover --execute --reply "保持 Issue 范围，不迁移历史数据"
+~~~
+
+确认 escalation 时仍会校验：精确匹配已记录的 task 与 dispatch、Orca task 已完成、
+tracked worktree 干净、base 祖先关系成立，并且存在预期 commit 或 audit artifact。
+如果同一批 inbox 消息中较旧 escalation 后已有精确匹配的 `worker_done`，以后者为准。
+
+如果活动 GitHub Issue 已关闭，Harness 会 block，而不会静默丢弃 job。先预览，再带原因
+显式取消：
+
+~~~bash
+pnpm harness cancel --reason "issue closed as not planned" --dry-run
+pnpm harness cancel --reason "issue closed as not planned" --execute
+~~~
+
+取消操作幂等，并会释放单任务槽位；默认保留 Orca worktree 与 Git 分支。只有 cancel
+预览确认安全后，才附加 `--remove-worktree`。
+
 如果审计后的返工 worker 超时且没有产生新提交，只有在旧任务已经失败、
 worktree 仍干净地停留在已审计提交、审计证据仍然有效时，
 `recover --dry-run` 才会提出重新派发计划。审查计划后，使用
 `recover --execute` 重试返工；`watch` 不会自动重试这种情况。
+
+### 清理终态 worktree
+
+先预览已合并和已取消 job 的清理计划，再执行：
+
+~~~bash
+pnpm harness cleanup --dry-run
+pnpm harness cleanup --job JOB_ID --execute
+~~~
+
+Cleanup 不会处理活动 job，也不会删除分支。它会拒绝包含 tracked 或 untracked 改动的
+worktree，核验 ledger 中记录的完整 Orca worktree identity、当前分支和 HEAD，通过
+Orca 删除 worktree（同时关闭其中 terminals），最后清除 ledger 中失效的运行时句柄。
+省略 `--job` 时，会把已审阅的计划应用到全部符合条件的终态 job。
 
 ## 参考
 

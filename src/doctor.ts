@@ -132,6 +132,24 @@ export function runDoctor(configPath?: string): DoctorReport {
   const impl = config.agentProfiles[config.activeProfiles.implementer];
   const aud = config.agentProfiles[config.activeProfiles.auditor];
 
+  if (config.notifications.enabled) {
+    const command = config.notifications.command[0]!;
+    const commandPath = command.includes("/")
+      ? (existsSync(command) ? command : null)
+      : which(command);
+    checks.push({
+      name: "notifications:command",
+      level: commandPath ? "ok" : "fail",
+      detail: commandPath ?? `${command} not found`,
+    });
+  } else {
+    checks.push({
+      name: "notifications:command",
+      level: "ok",
+      detail: "disabled",
+    });
+  }
+
   // gh
   const ghPath = which("gh");
   if (!ghPath) {

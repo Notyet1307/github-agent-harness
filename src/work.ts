@@ -28,6 +28,8 @@ export type WorkCycleOptions = {
   repoFilter?: string;
   waitMergeTimeoutMinutes?: number;
   dryRun?: boolean;
+  acknowledgeEscalation?: boolean;
+  decisionReply?: string;
 };
 
 export type WorkCycleResult = {

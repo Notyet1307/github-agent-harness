@@ -35,6 +35,16 @@ test("implementation retry waits for explicit recover execution", () => {
   assert.equal(p.step, "blocked_wait");
 });
 
+test("worker intervention waits for a human instead of becoming unknown", () => {
+  const p = planWatchCycle({
+    kind: "resolve_intervention",
+    reason: "worker requested a human decision",
+    intervention: "decision_gate",
+  });
+  assert.equal(p.step, "blocked_wait");
+  assert.match(p.reason, /human decision_gate required/);
+});
+
 test("completed implementation with commits resumes finalization", () => {
   const p = planWatchCycle({
     kind: "finalize_implement",
@@ -112,4 +122,35 @@ test("watch adapter consumes exactly one coordinator action per tick", () => {
   assert.equal(cycle.plan.step, "claim_and_implement");
   assert.equal(runOnceCalls, 1);
   assert.equal(recoveryExecuteCalls, 0);
+});
+
+test("watch adapter invokes the intervention notifier without executing recovery", () => {
+  let notifyCalls = 0;
+  const coordinator = new WorkCoordinator({
+    recover: () => ({
+      ok: true,
+      jobId: "job-1",
+      message: "worker requested a human decision",
+      action: {
+        kind: "resolve_intervention",
+        reason: "worker requested a human decision",
+        intervention: "decision_gate",
+      },
+      details: { state: "blocked" },
+      executed: false,
+    }),
+  });
+
+  const cycle = runWatchCycle({
+    coordinator,
+    log: () => {},
+    notifyIntervention: () => {
+      notifyCalls += 1;
+      return { ok: true, status: "sent", message: "sent" };
+    },
+  });
+
+  assert.equal(cycle.plan.step, "blocked_wait");
+  assert.equal(cycle.notification?.status, "sent");
+  assert.equal(notifyCalls, 1);
 });
