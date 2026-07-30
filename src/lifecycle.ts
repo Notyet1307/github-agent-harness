@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { defaultLedgerPath, defaultLockPath } from "./config.js";
-import { currentBranch, revParse, statusPorcelain } from "./git.js";
+import { checkAncestor, currentBranch, revParse, statusPorcelain } from "./git.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaJson, requireOrcaCli } from "./orca.js";
@@ -142,10 +142,20 @@ export function reopenAuditFailure(
       return { ok: false, message: `job ${job.id} is not a blocked job with final failed audit evidence`, items: [item(job, "noop", false, "requires blocked failed audit evidence", false)] };
     }
     const reason = options.reason?.trim() || "<reason required for execute>";
-    const plan = item(job, "reopen_audit", true, `repeat audit round ${job.audit_round} after rework: ${reason}`, !dryRun);
+    const updatedHead = currentDescendantOfAuditedHead(job);
+    const targetState = updatedHead ? "awaiting_audit" : "reworking";
+    const plan = item(
+      job,
+      "reopen_audit",
+      true,
+      updatedHead
+        ? `repeat audit round ${job.audit_round} from already committed fix ${updatedHead.slice(0, 7)}: ${reason}`
+        : `repeat audit round ${job.audit_round} after rework: ${reason}`,
+      !dryRun,
+    );
     if (dryRun) return { ok: true, message: "reopen audit plan", items: [plan] };
     const reopened = ledger.updateJobIf(job.id, job.revision, {
-      state: "reworking",
+      state: targetState,
       audit_round: job.audit_round - 1,
       implementer_task_id: null,
       implementer_dispatch_id: null,
@@ -154,6 +164,7 @@ export function reopenAuditFailure(
       auditor_dispatch_id: null,
       dispatch_attempt: 0,
       dispatch_probe_pending: 0,
+      head_sha: updatedHead ?? job.head_sha,
       last_error: `reopened after failed audit r${job.audit_round}: ${reason}`,
       intervention_resolved_at: new Date().toISOString(),
     });
@@ -163,6 +174,14 @@ export function reopenAuditFailure(
     ledger.close();
     lock.release();
   }
+}
+
+function currentDescendantOfAuditedHead(job: Job): string | null {
+  if (!job.worktree_path || !job.audit_head_sha) return null;
+  const currentHead = revParse(job.worktree_path);
+  if (!currentHead || currentHead === job.audit_head_sha) return null;
+  const ancestry = checkAncestor(job.worktree_path, job.audit_head_sha, currentHead);
+  return ancestry.ok && ancestry.isAncestor ? currentHead : null;
 }
 
 function parseFailedAudit(value: string | null): boolean {

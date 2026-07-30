@@ -123,6 +123,27 @@ test("reopen requires an explicit reason and repeats the final audit round after
   assert.equal(fixture.job().implementer_task_id, null);
 });
 
+test("reopen skips rework when a clean committed descendant already addresses the audit", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const auditedHead = fixture.job().head_sha;
+  writeFileSync(join(fixture.worktree, "file.txt"), "post-audit fix\n");
+  git(fixture.worktree, "add", "file.txt");
+  git(fixture.worktree, "commit", "-m", "post-audit fix");
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", {
+    audit_round: 3,
+    audit_head_sha: auditedHead,
+    audit_result_json: JSON.stringify({ status: "fail" }),
+  });
+  ledger.close();
+
+  const applied = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "committed fix" });
+  assert.equal(applied.ok, true);
+  assert.equal(fixture.job().state, "awaiting_audit");
+  assert.notEqual(fixture.job().head_sha, auditedHead);
+});
+
 function makeFixture(): {
   ledgerPath: string;
   lockPath: string;
