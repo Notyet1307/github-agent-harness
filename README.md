@@ -161,9 +161,14 @@ notifications:
   timeoutSeconds: 30
   reminderMinutes: [0, 30, 120]
   maxAttemptsPerReminder: 3
+  # Optional progress updates; alerts for blocked/intervention are always on.
+  statusEvents: [rework_started, pr_created, merged, issue_claimed]
 ~~~
 
 This reuses Hermes credentials; do not copy a Telegram token into Harness.
+`statusEvents` is optional and defaults to `[]`: each selected lifecycle update
+is delivered once, without reminders, while blocked and decision-gate alerts
+continue to use the configured reminder schedule.
 Before leaving the watcher unattended, verify `hermes gateway status` and
 `hermes send --list telegram`. The notification command runs without a shell,
 is deduplicated in the ledger, and retries each reminder a bounded number of

@@ -166,6 +166,7 @@ function normalizeNotifications(raw: unknown): NotificationConfig {
       timeoutSeconds: 30,
       reminderMinutes: [0, 30, 120],
       maxAttemptsPerReminder: 3,
+      statusEvents: [],
     };
   }
   if (!raw || typeof raw !== "object") {
@@ -177,6 +178,7 @@ function normalizeNotifications(raw: unknown): NotificationConfig {
   const timeoutSeconds = value.timeoutSeconds ?? 30;
   const reminderMinutes = value.reminderMinutes ?? [0, 30, 120];
   const maxAttemptsPerReminder = value.maxAttemptsPerReminder ?? 3;
+  const statusEvents = value.statusEvents ?? [];
   if (typeof enabled !== "boolean") {
     throw new Error("notifications.enabled must be boolean");
   }
@@ -210,12 +212,30 @@ function normalizeNotifications(raw: unknown): NotificationConfig {
       "notifications.maxAttemptsPerReminder must be an integer from 1 to 10",
     );
   }
+  const allowedStatusEvents = new Set([
+    "rework_started",
+    "pr_created",
+    "merged",
+    "issue_claimed",
+  ]);
+  if (
+    !Array.isArray(statusEvents) ||
+    statusEvents.some(
+      (event) =>
+        typeof event !== "string" || !allowedStatusEvents.has(event),
+    )
+  ) {
+    throw new Error(
+      "notifications.statusEvents must contain only rework_started, pr_created, merged, issue_claimed",
+    );
+  }
   return {
     enabled,
     command: [...command],
     timeoutSeconds,
     reminderMinutes: [...new Set(reminderMinutes)].sort((a, b) => a - b),
     maxAttemptsPerReminder,
+    statusEvents: [...new Set(statusEvents)] as NotificationConfig["statusEvents"],
   };
 }
 

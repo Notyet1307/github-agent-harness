@@ -39,13 +39,18 @@ export function verdictWorkerLiveness(
   snap: TerminalProbeSnapshot,
 ): WorkerLivenessVerdict {
   const blob = [snap.title, snap.preview, snap.tailText].join("\n").toLowerCase();
-  const exhaustedResponsesStream =
-    blob.includes("retry failed after 3 attempts") &&
-    blob.includes("responses stream ended before a terminal response event");
-  if (exhaustedResponsesStream) {
+  const exhaustedRetry = /retry failed after \d+ attempts/.test(blob);
+  const terminalProviderFailure =
+    blob.includes("responses stream ended before a terminal response event") ||
+    /\b(?:openai|provider|gateway|api)\b.*\b(?:502|503|504|429|overloaded_error|rate.?limit|connection (?:reset|refused|timed out))\b/.test(
+      blob,
+    );
+  if (exhaustedRetry && terminalProviderFailure) {
     return {
       healthy: false,
-      reason: "provider Responses stream failed after Pi exhausted its retries",
+      reason: blob.includes("responses stream ended before a terminal response event")
+        ? "provider Responses stream failed after Pi exhausted its retries"
+        : "provider request failed after Pi exhausted its retries",
     };
   }
   return { healthy: true };

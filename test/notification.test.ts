@@ -7,8 +7,10 @@ import { Ledger } from "../src/ledger.js";
 import {
   blockedEventKey,
   notifyActiveIntervention,
+  notifyStatusEvent,
   renderBlockedNotification,
   renderInterventionNotification,
+  renderStatusNotification,
 } from "../src/notification.js";
 import type { ExecResult } from "../src/exec.js";
 import type { Job, WorkerIntervention } from "../src/types.js";
@@ -181,9 +183,29 @@ test("failed notification retries are bounded per reminder", (t) => {
   assert.equal(calls, 2);
 });
 
+test("opt-in lifecycle updates send once without alert reminders", (t) => {
+  const fixture = createFixture(t, 2, ["merged"]);
+  const ledger = new Ledger(fixture.ledgerPath);
+  const job = ledger.getJob("job-1")!;
+  ledger.close();
+  const inputs: string[] = [];
+  const exec = (_command: string, _args: string[], options: { input?: string } = {}): ExecResult => {
+    inputs.push(options.input ?? "");
+    return { ok: true, code: 0, stdout: "", stderr: "" };
+  };
+  const first = notifyStatusEvent({ ...fixture, event: "merged", job, exec });
+  const duplicate = notifyStatusEvent({ ...fixture, event: "merged", job, exec });
+  assert.equal(first.status, "sent");
+  assert.equal(duplicate.status, "not_due");
+  assert.equal(inputs.length, 1);
+  assert.match(inputs[0]!, /Harness 状态更新/);
+  assert.match(renderStatusNotification(job, "merged"), /PR 已合并/);
+});
+
 function createFixture(
   t: Parameters<typeof test>[1] extends (t: infer T) => unknown ? T : never,
   maxAttempts: number,
+  statusEvents: string[] = [],
 ): { configPath: string; ledgerPath: string; lockPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "harness-notification-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -199,6 +221,7 @@ notifications:
   command: [notify-test]
   reminderMinutes: [0, 30, 120]
   maxAttemptsPerReminder: ${maxAttempts}
+  statusEvents: ${JSON.stringify(statusEvents)}
 repositories:
   - github: owner/repo
     baseRef: origin/main
