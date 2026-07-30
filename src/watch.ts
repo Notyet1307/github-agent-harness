@@ -203,7 +203,10 @@ export function runWatchCycle(opts: {
   opts.log(`plan: ${plan.step} — ${plan.reason}`);
 
   let notification: NotificationResult | undefined;
-  if (coordinated.plan.action.kind === "resolve_intervention") {
+  if (
+    coordinated.plan.action.kind === "resolve_intervention" ||
+    plan.step === "blocked_wait"
+  ) {
     notification = (opts.notifyIntervention ?? notifyActiveIntervention)({
       configPath: opts.configPath,
       ledgerPath: opts.ledgerPath,

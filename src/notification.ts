@@ -48,8 +48,9 @@ export function notifyActiveIntervention(options: {
   let planned:
     | {
         job: Job;
-        intervention: WorkerIntervention;
+        intervention: WorkerIntervention | null;
         eventKey: string;
+        eventKind: "intervention" | "blocked";
         reminderMinutes: number;
         rendered: string;
         attempt: number;
@@ -59,19 +60,25 @@ export function notifyActiveIntervention(options: {
     ledger = new Ledger(ledgerPath);
     const job = ledger.getActiveJob();
     const intervention = job ? parseWorkerIntervention(job) : null;
-    if (!job || !intervention || job.intervention_resolved_at) {
+    const activeIntervention =
+      intervention && !job?.intervention_resolved_at ? intervention : null;
+    if (!job || (!activeIntervention && job.state !== "blocked")) {
       return {
         ok: true,
         status: "none",
-        message: "no unresolved worker intervention",
+        message: "no unresolved worker intervention or blocked job",
       };
     }
 
-    const eventKey = interventionEventKey(job, intervention);
+    const eventKind = activeIntervention ? "intervention" : "blocked";
+    const observedAt = activeIntervention?.observedAt ?? job.updated_at;
+    const eventKey = activeIntervention
+      ? interventionEventKey(job, activeIntervention)
+      : blockedEventKey(job);
     const reminderMinutes = nextReminder(
       ledger,
       eventKey,
-      intervention,
+      observedAt,
       config.notifications,
       options.now ?? new Date(),
     );
@@ -79,19 +86,17 @@ export function notifyActiveIntervention(options: {
       return {
         ok: true,
         status: "not_due",
-        message: "intervention notification already delivered or not due",
+        message: "attention notification already delivered or not due",
       };
     }
-    const rendered = renderInterventionNotification(
-      job,
-      intervention,
-      reminderMinutes,
-    );
+    const rendered = activeIntervention
+      ? renderInterventionNotification(job, activeIntervention, reminderMinutes)
+      : renderBlockedNotification(job, reminderMinutes);
     if (options.dryRun) {
       return {
         ok: true,
         status: "dry_run",
-        message: `would send ${intervention.kind} notification (${reminderMinutes}m)`,
+        message: `would send ${eventKind} notification (${reminderMinutes}m)`,
         rendered,
         reminderMinutes,
       };
@@ -111,8 +116,9 @@ export function notifyActiveIntervention(options: {
     }
     planned = {
       job,
-      intervention,
+      intervention: activeIntervention,
       eventKey,
+      eventKind,
       reminderMinutes,
       rendered,
       attempt: reservation.attempts,
@@ -160,14 +166,14 @@ export function notifyActiveIntervention(options: {
     ? {
         ok: true,
         status: "sent",
-        message: `${planned.intervention.kind} notification sent (${planned.reminderMinutes}m, attempt ${planned.attempt})`,
+        message: `${planned.eventKind} notification sent (${planned.reminderMinutes}m, attempt ${planned.attempt})`,
         reminderMinutes: planned.reminderMinutes,
         attempt: planned.attempt,
       }
     : {
         ok: false,
         status: "failed",
-        message: `${planned.intervention.kind} notification failed (${planned.reminderMinutes}m, attempt ${planned.attempt}): ${error}`,
+        message: `${planned.eventKind} notification failed (${planned.reminderMinutes}m, attempt ${planned.attempt}): ${error}`,
         reminderMinutes: planned.reminderMinutes,
         attempt: planned.attempt,
       };
@@ -176,11 +182,11 @@ export function notifyActiveIntervention(options: {
 function nextReminder(
   ledger: Ledger,
   eventKey: string,
-  intervention: WorkerIntervention,
+  observedAt: string,
   config: NotificationConfig,
   now: Date,
 ): number | null {
-  const observed = Date.parse(intervention.observedAt);
+  const observed = Date.parse(observedAt);
   const elapsedMinutes = Number.isFinite(observed)
     ? Math.max(0, (now.getTime() - observed) / 60_000)
     : 0;
@@ -206,6 +212,41 @@ export function interventionEventKey(
     intervention.messageId ?? "-",
     intervention.observedAt,
   ].join(":");
+}
+
+export function blockedEventKey(job: Pick<Job, "id" | "head_sha" | "audit_round" | "last_error">): string {
+  return [
+    job.id,
+    "blocked",
+    job.head_sha ?? "-",
+    String(job.audit_round),
+    job.last_error ?? "-",
+  ].join(":");
+}
+
+export function renderBlockedNotification(
+  job: Job,
+  reminderMinutes = 0,
+): string {
+  const issue = parseIssueTitle(job.issue_snapshot_json);
+  const heading = reminderMinutes > 0
+    ? `Harness 阻塞提醒（${reminderMinutes} 分钟）`
+    : "Harness 任务已阻塞";
+  return [
+    heading,
+    "",
+    `任务：${job.repo}#${job.issue_number}${issue ? ` ${issue}` : ""}`,
+    `Job：${job.id}（通知时 revision ${job.revision}）`,
+    `阶段：${job.state}`,
+    `HEAD：${job.head_sha ?? "unknown"}`,
+    `原因：${job.last_error ?? "未记录；请检查 Harness status"}`,
+    "",
+    "Harness 建议：先查看审计或运行证据，再选择最小范围的 rework 或明确取消。",
+    "处理命令（请先审阅，再复制执行）：pnpm harness recover --dry-run",
+    "",
+    "注意：通知失败或收到 Telegram 回复都不会自动解除 blocked。",
+    "",
+  ].join("\n");
 }
 
 export function renderInterventionNotification(

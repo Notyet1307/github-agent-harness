@@ -5,7 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Ledger } from "../src/ledger.js";
 import {
+  blockedEventKey,
   notifyActiveIntervention,
+  renderBlockedNotification,
   renderInterventionNotification,
 } from "../src/notification.js";
 import type { ExecResult } from "../src/exec.js";
@@ -88,6 +90,42 @@ test("notification includes exact provenance, worker guidance, advice, and reply
   assert.match(rendered, /保持原 Issue 范围/);
   assert.match(rendered, /recover --execute --reply/);
   assert.match(rendered, /Telegram 回复都不会自动解除 blocked/);
+});
+
+test("blocked audit failure is rendered and keyed independently of interventions", () => {
+  const job = fakeJob();
+  job.intervention_json = null;
+  job.last_error = "audit failed on final round 3: blocking findings standards=0 spec=1 validation=0";
+  const rendered = renderBlockedNotification(job);
+
+  assert.match(rendered, /Harness 任务已阻塞/);
+  assert.match(rendered, /audit failed on final round 3/);
+  assert.match(rendered, /recover --dry-run/);
+  assert.match(blockedEventKey(job), /job-1:blocked:abc123:0:audit failed/);
+});
+
+test("blocked jobs notify even without a worker intervention", (t) => {
+  const fixture = createFixture(t, 3);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", {
+    intervention_json: null,
+    last_error: "audit failed on final round 3: blocking findings standards=0 spec=1 validation=0",
+  });
+  ledger.close();
+  const inputs: string[] = [];
+
+  const result = notifyActiveIntervention({
+    ...fixture,
+    now: new Date("2026-07-29T00:01:00Z"),
+    exec: (_command, _args, options = {}) => {
+      inputs.push(options.input ?? "");
+      return { ok: true, code: 0, stdout: "{}", stderr: "" };
+    },
+  });
+
+  assert.equal(result.status, "sent");
+  assert.match(inputs[0] ?? "", /Harness 任务已阻塞/);
+  assert.match(inputs[0] ?? "", /audit failed on final round 3/);
 });
 
 test("notification command receives stdin and deliveries are deduplicated with reminders", (t) => {
