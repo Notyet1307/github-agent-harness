@@ -34,13 +34,11 @@ test("waitMerge releases the PID lock while sleeping between polls", async (t) =
   const binDir = join(dir, "bin");
   const markerPath = join(dir, "sleeping");
   const releasePath = join(dir, "release-sleep");
-  const ghCountPath = join(dir, "gh-count");
   const resultPath = join(dir, "result.json");
   const lockPath = join(dir, "harness.lock");
   const ledgerPath = join(dir, "harness.sqlite");
   const configPath = join(dir, "harness.yaml");
   const runnerPath = join(dir, "runner.mjs");
-  writeFileSync(ghCountPath, "0");
   writeFileSync(join(dir, ".keep"), "");
   execFileSync("git", ["init", "-b", "main"], { cwd: dir });
   execFileSync(
@@ -67,15 +65,13 @@ while (!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(wait, 0, 0, 
     fakeGh,
     `#!/usr/bin/env node
 const fs = require("node:fs");
-const countPath = ${JSON.stringify(ghCountPath)};
-const count = Number(fs.readFileSync(countPath, "utf8")) + 1;
-fs.writeFileSync(countPath, String(count));
+const sleeping = fs.existsSync(${JSON.stringify(markerPath)});
 console.log(JSON.stringify({
   number: 1,
   url: "https://example.test/pull/1",
   title: "Test PR",
-  state: count === 1 ? "OPEN" : "MERGED",
-  mergedAt: count === 1 ? null : "2026-07-26T01:00:00Z",
+  state: sleeping ? "MERGED" : "OPEN",
+  mergedAt: sleeping ? "2026-07-26T01:00:00Z" : null,
   mergeStateStatus: "CLEAN",
   reviewDecision: "APPROVED",
   statusCheckRollup: [],
