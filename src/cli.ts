@@ -38,7 +38,7 @@ Usage:
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness recover [--config path] [--dry-run] [--execute] [--acknowledge-escalation | --reply text]
   harness cancel [--job ID] [--reason text] [--remove-worktree] [--dry-run | --execute] [--config path]
-  harness cleanup [--docker] [--job ID] [--dry-run | --execute] [--config path]
+  harness cleanup [--docker] [--legacy] [--job ID] [--dry-run | --execute] [--config path]
   harness work [--config path] [--repo OWNER/REPO] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness status [--config path]
@@ -400,7 +400,7 @@ function main(argv: string[]): number {
       const job = selected ? ledger.getJob(selected) : null;
       const jobs = selected ? (job ? [job] : []) : ledger.listJobs(10_000);
       ledger.close();
-      const items = cleanupHarnessDocker(jobs, dryRun);
+      const items = cleanupHarnessDocker(jobs, { dryRun, legacy: args.includes("--legacy") });
       for (const item of items) {
         process.stdout.write(`${dryRun ? "PLAN" : item.ok ? "APPLIED" : "FAIL"} docker ${item.project} job=${item.jobId} containers=${item.containers.length} volumes=${item.volumes.length} networks=${item.networks.length}: ${item.message}\n`);
       }

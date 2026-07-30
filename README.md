@@ -228,6 +228,7 @@ Preview cleanup of merged and cancelled jobs before applying it:
 pnpm harness cleanup --dry-run
 pnpm harness cleanup --job JOB_ID --execute
 pnpm harness cleanup --docker --dry-run
+pnpm harness cleanup --docker --legacy --dry-run
 ~~~
 
 Cleanup never touches an active job or deletes its branch. It refuses a
@@ -236,6 +237,13 @@ worktree identity plus the checked-out branch and HEAD, removes the worktree
 through Orca (which closes its terminals), and then clears stale runtime
 handles from the ledger. Omitting `--job` applies the reviewed plan to all
 eligible terminal jobs.
+
+`cleanup --docker` removes only Compose containers, networks, and volumes whose
+labels prove that they belong to a terminal Harness worktree. It never removes
+images or build cache, because those are shared Docker resources. The optional
+`--legacy` preview additionally recognizes the canonical Orca path
+`.../orca/workspaces/REPO/issue-N` for historical jobs whose worktree path was
+already cleared from the ledger. Review that preview before using `--execute`.
 
 ## Reference
 

@@ -20,11 +20,21 @@ export type DockerCleanupItem = {
   message: string;
 };
 
+export type DockerCleanupOptions = {
+  dryRun: boolean;
+  /**
+   * Older worktree cleanup erased ledger paths. This opt-in recognizes only
+   * Orca's canonical issue worktree label, never arbitrary Compose projects.
+   */
+  legacy?: boolean;
+};
+
 export function cleanupHarnessDocker(
   jobs: Job[],
-  dryRun: boolean,
+  options: DockerCleanupOptions,
   run: typeof execFile = execFile,
 ): DockerCleanupItem[] {
+  const { dryRun, legacy = false } = options;
   const terminalByWorktree = new Map(
     jobs
       .filter((job) => TERMINAL_JOB_STATES.has(job.state) && job.worktree_path)
@@ -41,25 +51,35 @@ export function cleanupHarnessDocker(
   if (!inspected.ok) {
     return [{ project: "-", jobId: "-", state: "cancelled", containers: [], volumes: [], networks: [], executed: false, ok: false, message: dockerError(inspected) }];
   }
-  const groups = new Map<string, { job: Job; containers: string[] }>();
+  const groups = new Map<string, { project: string; worktree: string; job: Job; containers: string[]; legacy: boolean }>();
   for (const container of JSON.parse(inspected.stdout) as DockerInspect[]) {
     const labels = container.Config?.Labels ?? {};
     const project = labels["com.docker.compose.project"];
     const worktree = labels["com.docker.compose.project.working_dir"];
-    if (!project || !worktree || activeWorktrees.has(worktree)) continue;
-    const job = terminalByWorktree.get(worktree);
+    if (!project || !worktree || activeWorktrees.has(worktree) || matchesActiveLegacyWorktree(jobs, worktree)) continue;
+    const exactJob = terminalByWorktree.get(worktree);
+    const job = exactJob ?? (legacy ? findLegacyTerminalJob(jobs, worktree) : undefined);
     if (!job) continue;
-    const group = groups.get(project) ?? { job, containers: [] };
+    const key = `${project}\u0000${worktree}`;
+    const group = groups.get(key) ?? { project, worktree, job, containers: [], legacy: !exactJob };
     if (container.Id) group.containers.push(container.Id);
-    groups.set(project, group);
+    groups.set(key, group);
   }
-  return [...groups].map(([project, group]) => {
+  const uniqueProjectGroups = [...groups.values()].filter((group) =>
+    [...groups.values()].filter((other) => other.project === group.project).length === 1,
+  );
+  return uniqueProjectGroups.map((group) => {
+    const { project } = group;
     const volumes = dockerLines(run("docker", ["volume", "ls", "-q", "--filter", `label=com.docker.compose.project=${project}`]));
     const networks = dockerLines(run("docker", ["network", "ls", "-q", "--filter", `label=com.docker.compose.project=${project}`]));
     const item: DockerCleanupItem = {
       project, jobId: group.job.id, state: group.job.state,
       containers: group.containers, volumes, networks, executed: !dryRun, ok: true,
-      message: dryRun ? "remove terminal Compose resources proven by labels and ledger" : "removed terminal Compose resources",
+      message: dryRun
+        ? group.legacy
+          ? "remove legacy terminal Compose resources proven by Orca path label and ledger issue"
+          : "remove terminal Compose resources proven by labels and ledger"
+        : "removed terminal Compose resources",
     };
     if (dryRun) return item;
     const removals = [
@@ -70,6 +90,28 @@ export function cleanupHarnessDocker(
     const failed = removals.find((result) => !result.ok);
     return failed ? { ...item, ok: false, message: dockerError(failed) } : item;
   });
+}
+
+function findLegacyTerminalJob(jobs: Job[], worktree: string): Job | undefined {
+  return jobs.find((job) =>
+    TERMINAL_JOB_STATES.has(job.state) && legacyWorktreeMatchesJob(worktree, job),
+  );
+}
+
+function matchesActiveLegacyWorktree(jobs: Job[], worktree: string): boolean {
+  return jobs.some((job) =>
+    !TERMINAL_JOB_STATES.has(job.state) && legacyWorktreeMatchesJob(worktree, job),
+  );
+}
+
+function legacyWorktreeMatchesJob(worktree: string, job: Job): boolean {
+  const match = /\/orca\/workspaces\/([^/]+)\/issue-(\d+)\/?$/.exec(worktree);
+  const repoName = job.repo.split("/").at(-1);
+  return Boolean(
+    match && repoName &&
+      match[1]!.toLowerCase() === repoName.toLowerCase() &&
+      Number(match[2]) === job.issue_number,
+  );
 }
 
 function dockerLines(result: ExecResult): string[] {
