@@ -323,26 +323,9 @@ function pollMergeOnce(
   }
 
   if (config.mergePolicy.mode === "auto") {
-    if (viewed.pr.mergeStateStatus !== "CLEAN") {
-      const cancellation = cancelAutoMergeIfRequested(
-        ledger,
-        job,
-        repo,
-        viewed.pr,
-        log,
-      );
-      if (cancellation) return cancellation;
-      log(
-        `waiting for GitHub merge state CLEAN (current ${viewed.pr.mergeStateStatus ?? "unknown"})`,
-      );
-      const updated = ledger.updateJobIf(job.id, job.revision, {
-        pr_number: viewed.pr.number,
-        pr_url: viewed.pr.url,
-        last_error: null,
-      });
-      if (!updated) return jobChanged(job.id);
-      return { done: false, job: updated };
-    }
+    // Ask GitHub as soon as the audited PR is safe to queue.  GitHub keeps
+    // the merge pending until its required checks and reviews are satisfied;
+    // waiting for CLEAN here created an unnecessary extra watch cycle.
     if (!viewed.pr.autoMergeRequest) {
       const expectedHeadSha = job.head_sha;
       if (!expectedHeadSha) {
@@ -373,6 +356,19 @@ function pollMergeOnce(
         return { done: false, job: updated };
       }
       log(`requested GitHub auto-merge for PR #${viewed.pr.number}`);
+    }
+
+    if (viewed.pr.mergeStateStatus !== "CLEAN") {
+      log(
+        `GitHub auto-merge queued; waiting for branch protections (merge state ${viewed.pr.mergeStateStatus ?? "unknown"})`,
+      );
+      const updated = ledger.updateJobIf(job.id, job.revision, {
+        pr_number: viewed.pr.number,
+        pr_url: viewed.pr.url,
+        last_error: null,
+      });
+      if (!updated) return jobChanged(job.id);
+      return { done: false, job: updated };
     }
   }
 
