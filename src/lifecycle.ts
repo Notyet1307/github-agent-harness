@@ -144,6 +144,9 @@ export function reopenAuditFailure(
     const reason = options.reason?.trim() || "<reason required for execute>";
     const updatedHead = currentDescendantOfAuditedHead(job);
     const targetState = updatedHead ? "awaiting_audit" : "reworking";
+    const auditRound = updatedHead && job.last_error?.startsWith("rework HEAD changed before rework dispatch")
+      ? job.audit_round
+      : job.audit_round - 1;
     const plan = item(
       job,
       "reopen_audit",
@@ -156,7 +159,7 @@ export function reopenAuditFailure(
     if (dryRun) return { ok: true, message: "reopen audit plan", items: [plan] };
     const reopened = ledger.updateJobIf(job.id, job.revision, {
       state: targetState,
-      audit_round: job.audit_round - 1,
+      audit_round: auditRound,
       implementer_task_id: null,
       implementer_dispatch_id: null,
       auditor_terminal_handle: null,
