@@ -166,7 +166,9 @@ This reuses Hermes credentials; do not copy a Telegram token into Harness.
 Before leaving the watcher unattended, verify `hermes gateway status` and
 `hermes send --list telegram`. The notification command runs without a shell,
 is deduplicated in the ledger, and retries each reminder a bounded number of
-times. Delivery failure never unblocks the job. Phase 1 is intentionally
+times. Delivery failure never unblocks the job. A worker that exhausts its
+known provider stream retries is blocked at the next 60-second health probe
+instead of waiting for the full worker timeout. Phase 1 is intentionally
 one-way: replying in Telegram does not execute a decision. Review the message,
 then run its `harness recover --execute ...` command locally.
 

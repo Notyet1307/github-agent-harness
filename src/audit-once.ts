@@ -713,6 +713,7 @@ function runAuditPhase(
       controllerHandle: job.controller_terminal_handle!,
       taskId: waitTaskId,
       dispatchId: waitDispatchId,
+      workerHandle: job.auditor_terminal_handle,
       timeoutMs: config.auditTimeoutMinutes * 60_000,
       onTick: (info) => log(info),
     });
@@ -1325,6 +1326,7 @@ function runReworkPhase(
     controllerHandle: job.controller_terminal_handle!,
     taskId: waitTaskId,
     dispatchId: waitDispatchId,
+    workerHandle: job.implementer_terminal_handle,
     timeoutMs: config.implementTimeoutMinutes * 60_000,
     onTick: (info) => log(info),
   });
