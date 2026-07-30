@@ -227,6 +227,7 @@ Preview cleanup of merged and cancelled jobs before applying it:
 ~~~bash
 pnpm harness cleanup --dry-run
 pnpm harness cleanup --job JOB_ID --execute
+pnpm harness cleanup --docker --dry-run
 ~~~
 
 Cleanup never touches an active job or deletes its branch. It refuses a
