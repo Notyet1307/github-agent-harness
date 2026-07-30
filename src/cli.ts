@@ -12,7 +12,7 @@ import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { checkSetupIdle } from "./setup.js";
-import { cancelJob, cleanupJobs, type LifecycleResult } from "./lifecycle.js";
+import { cancelJob, cleanupJobs, reopenAuditFailure, type LifecycleResult } from "./lifecycle.js";
 import { cleanupHarnessDocker } from "./docker-cleanup.js";
 import {
   addProject,
@@ -38,6 +38,7 @@ Usage:
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness recover [--config path] [--dry-run] [--execute] [--acknowledge-escalation | --reply text]
   harness cancel [--job ID] [--reason text] [--remove-worktree] [--dry-run | --execute] [--config path]
+  harness reopen [--job ID] [--reason text] [--dry-run | --execute] [--config path]
   harness cleanup [--docker] [--legacy] [--job ID] [--dry-run | --execute] [--config path]
   harness work [--config path] [--repo OWNER/REPO] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
@@ -382,6 +383,21 @@ function main(argv: string[]): number {
       jobId: readFlag(args, "--job"),
       reason: readFlag(args, "--reason"),
       removeWorktree: args.includes("--remove-worktree"),
+      dryRun: !args.includes("--execute"),
+    });
+    printLifecycleResult(result);
+    return result.ok ? 0 : 1;
+  }
+
+  if (cmd === "reopen") {
+    if (args.includes("--dry-run") && args.includes("--execute")) {
+      process.stderr.write("reopen accepts only one of --dry-run or --execute\n");
+      return 2;
+    }
+    const result = reopenAuditFailure({
+      configPath,
+      jobId: readFlag(args, "--job"),
+      reason: readFlag(args, "--reason"),
       dryRun: !args.includes("--execute"),
     });
     printLifecycleResult(result);

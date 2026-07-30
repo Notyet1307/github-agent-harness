@@ -11,7 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cancelJob, cleanupJobs } from "../src/lifecycle.js";
+import { cancelJob, cleanupJobs, reopenAuditFailure } from "../src/lifecycle.js";
 import { Ledger } from "../src/ledger.js";
 import { testProject } from "./support.js";
 
@@ -98,6 +98,29 @@ test("cleanup refuses untracked files and preserves the branch on successful rem
     "--force",
     "--json",
   ]);
+});
+
+test("reopen requires an explicit reason and repeats the final audit round after rework", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", {
+    audit_round: 3,
+    audit_head_sha: fixture.job().head_sha,
+    audit_result_json: JSON.stringify({ status: "fail" }),
+  });
+  ledger.close();
+
+  const preview = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
+  assert.equal(preview.ok, true);
+  assert.equal(preview.items[0]?.executed, false);
+  const refused = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false });
+  assert.equal(refused.ok, false);
+  const applied = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "addressed formula bypasses" });
+  assert.equal(applied.ok, true);
+  assert.equal(fixture.job().state, "reworking");
+  assert.equal(fixture.job().audit_round, 2);
+  assert.equal(fixture.job().implementer_task_id, null);
 });
 
 function makeFixture(): {

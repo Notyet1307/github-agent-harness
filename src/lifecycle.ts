@@ -12,7 +12,7 @@ export type LifecycleItem = {
   repo: string;
   issueNumber: number;
   state: Job["state"];
-  action: "cancel" | "remove_worktree" | "clear_missing_worktree" | "noop";
+  action: "cancel" | "reopen_audit" | "remove_worktree" | "clear_missing_worktree" | "noop";
   ok: boolean;
   message: string;
   branch?: string;
@@ -116,6 +116,60 @@ export function cancelJob(
   } finally {
     ledger.close();
     lock.release();
+  }
+}
+
+/**
+ * Human-gated escape hatch for a final audit failure with newly understood,
+ * actionable findings. Rework repeats the final audit round; it never raises
+ * the configured retry ceiling or discards the evidence that caused the block.
+ */
+export function reopenAuditFailure(
+  options: LifecycleOptions & { reason?: string },
+): LifecycleResult {
+  const dryRun = options.dryRun !== false;
+  if (!dryRun && !options.reason?.trim()) {
+    return { ok: false, message: "reopen --execute requires a non-empty --reason", items: [] };
+  }
+  const lock = acquireLock(options.lockPath ?? defaultLockPath());
+  if (!lock.ok) return { ok: false, message: lock.error ?? "lock failed", items: [] };
+  const ledger = new Ledger(options.ledgerPath ?? defaultLedgerPath());
+  try {
+    const job = options.jobId ? ledger.getJob(options.jobId) : ledger.getActiveJob();
+    if (!job) return { ok: false, message: options.jobId ? `job not found: ${options.jobId}` : "no active job", items: [] };
+    const audit = parseFailedAudit(job.audit_result_json);
+    if (job.state !== "blocked" || !audit || !job.audit_head_sha || job.audit_round < 1) {
+      return { ok: false, message: `job ${job.id} is not a blocked job with final failed audit evidence`, items: [item(job, "noop", false, "requires blocked failed audit evidence", false)] };
+    }
+    const reason = options.reason?.trim() || "<reason required for execute>";
+    const plan = item(job, "reopen_audit", true, `repeat audit round ${job.audit_round} after rework: ${reason}`, !dryRun);
+    if (dryRun) return { ok: true, message: "reopen audit plan", items: [plan] };
+    const reopened = ledger.updateJobIf(job.id, job.revision, {
+      state: "reworking",
+      audit_round: job.audit_round - 1,
+      implementer_task_id: null,
+      implementer_dispatch_id: null,
+      auditor_terminal_handle: null,
+      auditor_task_id: null,
+      auditor_dispatch_id: null,
+      dispatch_attempt: 0,
+      dispatch_probe_pending: 0,
+      last_error: `reopened after failed audit r${job.audit_round}: ${reason}`,
+      intervention_resolved_at: new Date().toISOString(),
+    });
+    if (!reopened) return { ok: false, message: `job ${job.id} changed before reopen; re-run dry-run`, items: [{ ...plan, ok: false, executed: false }] };
+    return { ok: true, message: `reopened job ${job.id} for rework and repeated audit r${job.audit_round}`, items: [plan] };
+  } finally {
+    ledger.close();
+    lock.release();
+  }
+}
+
+function parseFailedAudit(value: string | null): boolean {
+  try {
+    return JSON.parse(value ?? "{}").status === "fail";
+  } catch {
+    return false;
   }
 }
 

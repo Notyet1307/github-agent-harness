@@ -229,6 +229,7 @@ pnpm harness cleanup --dry-run
 pnpm harness cleanup --job JOB_ID --execute
 pnpm harness cleanup --docker --dry-run
 pnpm harness cleanup --docker --legacy --dry-run
+pnpm harness reopen --job JOB_ID --dry-run
 ~~~
 
 Cleanup never touches an active job or deletes its branch. It refuses a
@@ -237,6 +238,12 @@ worktree identity plus the checked-out branch and HEAD, removes the worktree
 through Orca (which closes its terminals), and then clears stale runtime
 handles from the ledger. Omitting `--job` applies the reviewed plan to all
 eligible terminal jobs.
+
+When a final audit failure has newly addressed, actionable findings, `reopen`
+provides the only supported way to continue it. It is a preview by default;
+`reopen --execute --reason "..."` records the human reason, preserves the
+failed audit evidence, dispatches rework, and repeats only that final audit
+round. It never silently increases the configured audit-round limit.
 
 `cleanup --docker` removes only Compose containers, networks, and volumes whose
 labels prove that they belong to a terminal Harness worktree. It never removes
