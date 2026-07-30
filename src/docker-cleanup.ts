@@ -52,20 +52,29 @@ export function cleanupHarnessDocker(
     return [{ project: "-", jobId: "-", state: "cancelled", containers: [], volumes: [], networks: [], executed: false, ok: false, message: dockerError(inspected) }];
   }
   const groups = new Map<string, { project: string; worktree: string; job: Job; containers: string[]; legacy: boolean }>();
+  const unsafeProjects = new Set<string>();
   for (const container of JSON.parse(inspected.stdout) as DockerInspect[]) {
     const labels = container.Config?.Labels ?? {};
     const project = labels["com.docker.compose.project"];
     const worktree = labels["com.docker.compose.project.working_dir"];
-    if (!project || !worktree || activeWorktrees.has(worktree) || matchesActiveLegacyWorktree(jobs, worktree)) continue;
+    if (!project || !worktree) continue;
+    if (activeWorktrees.has(worktree) || matchesActiveLegacyWorktree(jobs, worktree)) {
+      unsafeProjects.add(project);
+      continue;
+    }
     const exactJob = terminalByWorktree.get(worktree);
     const job = exactJob ?? (legacy ? findLegacyTerminalJob(jobs, worktree) : undefined);
-    if (!job) continue;
+    if (!job) {
+      unsafeProjects.add(project);
+      continue;
+    }
     const key = `${project}\u0000${worktree}`;
     const group = groups.get(key) ?? { project, worktree, job, containers: [], legacy: !exactJob };
     if (container.Id) group.containers.push(container.Id);
     groups.set(key, group);
   }
   const uniqueProjectGroups = [...groups.values()].filter((group) =>
+    !unsafeProjects.has(group.project) &&
     [...groups.values()].filter((other) => other.project === group.project).length === 1,
   );
   return uniqueProjectGroups.map((group) => {

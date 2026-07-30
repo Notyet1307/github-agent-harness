@@ -138,7 +138,8 @@ export function reopenAuditFailure(
     const job = options.jobId ? ledger.getJob(options.jobId) : ledger.getActiveJob();
     if (!job) return { ok: false, message: options.jobId ? `job not found: ${options.jobId}` : "no active job", items: [] };
     const audit = parseFailedAudit(job.audit_result_json);
-    if (job.state !== "blocked" || !audit || !job.audit_head_sha || job.audit_round < 1) {
+    const maxAuditRounds = loadRuntimeConfig(options.configPath).maxAuditRounds;
+    if (job.state !== "blocked" || !audit || !job.audit_head_sha || job.audit_round !== maxAuditRounds) {
       return { ok: false, message: `job ${job.id} is not a blocked job with final failed audit evidence`, items: [item(job, "noop", false, "requires blocked failed audit evidence", false)] };
     }
     const reason = options.reason?.trim() || "<reason required for execute>";

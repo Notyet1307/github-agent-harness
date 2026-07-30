@@ -144,6 +144,17 @@ test("reopen skips rework when a clean committed descendant already addresses th
   assert.notEqual(fixture.job().head_sha, auditedHead);
 });
 
+test("reopen refuses a failed audit that is not the configured final round", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", { audit_round: 2, audit_head_sha: fixture.job().head_sha, audit_result_json: JSON.stringify({ status: "fail" }) });
+  ledger.close();
+  const result = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /final failed audit evidence/);
+});
+
 function makeFixture(): {
   ledgerPath: string;
   lockPath: string;

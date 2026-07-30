@@ -39,6 +39,18 @@ test("legacy mode recognizes only the canonical Orca issue path", () => {
   assert.match(items[0]?.message ?? "", /legacy/);
 });
 
+test("refuses project-scoped resources when the project also has an active container", () => {
+  const items = cleanupHarnessDocker(
+    [job({ id: "done", state: "merged", issue: 6, worktree: "/work/issue-6" }), job({ id: "active", state: "auditing", issue: 33, worktree: "/work/issue-33" })],
+    { dryRun: true },
+    fakeDocker([], [
+      container("done-c", "shared-project", "/work/issue-6"),
+      container("active-c", "shared-project", "/work/issue-33"),
+    ]),
+  );
+  assert.deepEqual(items, []);
+});
+
 test("execute removes exact containers before labelled networks and volumes", () => {
   const calls: string[][] = [];
   const items = cleanupHarnessDocker(
