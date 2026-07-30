@@ -111,12 +111,12 @@ test("reopen requires an explicit reason and repeats the final audit round after
   });
   ledger.close();
 
-  const preview = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
+  const preview = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
   assert.equal(preview.ok, true);
   assert.equal(preview.items[0]?.executed, false);
-  const refused = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false });
+  const refused = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false });
   assert.equal(refused.ok, false);
-  const applied = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "addressed formula bypasses" });
+  const applied = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "addressed formula bypasses" });
   assert.equal(applied.ok, true);
   assert.equal(fixture.job().state, "reworking");
   assert.equal(fixture.job().audit_round, 2);
@@ -138,7 +138,7 @@ test("reopen skips rework when a clean committed descendant already addresses th
   });
   ledger.close();
 
-  const applied = reopenAuditFailure({ ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "committed fix" });
+  const applied = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "committed fix" });
   assert.equal(applied.ok, true);
   assert.equal(fixture.job().state, "awaiting_audit");
   assert.notEqual(fixture.job().head_sha, auditedHead);
