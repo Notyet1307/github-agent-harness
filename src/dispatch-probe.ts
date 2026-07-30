@@ -26,6 +26,31 @@ export type DispatchAcceptVerdict =
       unknown?: boolean;
     };
 
+export type WorkerLivenessVerdict =
+  | { healthy: true }
+  | { healthy: false; reason: string };
+
+/**
+ * Detect terminal states which cannot produce worker_done without a new
+ * provider request. Keep this deliberately narrow: Pi owns transient retries;
+ * Harness intervenes only after Pi reports that those retries are exhausted.
+ */
+export function verdictWorkerLiveness(
+  snap: TerminalProbeSnapshot,
+): WorkerLivenessVerdict {
+  const blob = [snap.title, snap.preview, snap.tailText].join("\n").toLowerCase();
+  const exhaustedResponsesStream =
+    blob.includes("retry failed after 3 attempts") &&
+    blob.includes("responses stream ended before a terminal response event");
+  if (exhaustedResponsesStream) {
+    return {
+      healthy: false,
+      reason: "provider Responses stream failed after Pi exhausted its retries",
+    };
+  }
+  return { healthy: true };
+}
+
 /**
  * Heuristics for "agent started the dispatched task".
  * Prefer strong signals (task id / worker preamble); fall back to non-idle TUI.

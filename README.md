@@ -166,7 +166,9 @@ This reuses Hermes credentials; do not copy a Telegram token into Harness.
 Before leaving the watcher unattended, verify `hermes gateway status` and
 `hermes send --list telegram`. The notification command runs without a shell,
 is deduplicated in the ledger, and retries each reminder a bounded number of
-times. Delivery failure never unblocks the job. Phase 1 is intentionally
+times. Delivery failure never unblocks the job. A worker that exhausts its
+known provider stream retries is blocked at the next 60-second health probe
+instead of waiting for the full worker timeout. Phase 1 is intentionally
 one-way: replying in Telegram does not execute a decision. Review the message,
 then run its `harness recover --execute ...` command locally.
 
@@ -225,6 +227,9 @@ Preview cleanup of merged and cancelled jobs before applying it:
 ~~~bash
 pnpm harness cleanup --dry-run
 pnpm harness cleanup --job JOB_ID --execute
+pnpm harness cleanup --docker --dry-run
+pnpm harness cleanup --docker --legacy --dry-run
+pnpm harness reopen --job JOB_ID --dry-run
 ~~~
 
 Cleanup never touches an active job or deletes its branch. It refuses a
@@ -233,6 +238,19 @@ worktree identity plus the checked-out branch and HEAD, removes the worktree
 through Orca (which closes its terminals), and then clears stale runtime
 handles from the ledger. Omitting `--job` applies the reviewed plan to all
 eligible terminal jobs.
+
+When a final audit failure has newly addressed, actionable findings, `reopen`
+provides the only supported way to continue it. It is a preview by default;
+`reopen --execute --reason "..."` records the human reason, preserves the
+failed audit evidence, dispatches rework, and repeats only that final audit
+round. It never silently increases the configured audit-round limit.
+
+`cleanup --docker` removes only Compose containers, networks, and volumes whose
+labels prove that they belong to a terminal Harness worktree. It never removes
+images or build cache, because those are shared Docker resources. The optional
+`--legacy` preview additionally recognizes the canonical Orca path
+`.../orca/workspaces/REPO/issue-N` for historical jobs whose worktree path was
+already cleared from the ledger. Review that preview before using `--execute`.
 
 ## Reference
 

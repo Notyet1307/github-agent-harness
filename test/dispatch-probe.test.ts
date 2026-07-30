@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { verdictDispatchAccepted } from "../src/dispatch-probe.js";
+import {
+  verdictDispatchAccepted,
+  verdictWorkerLiveness,
+} from "../src/dispatch-probe.js";
 
 test("accepts when task id appears in tail", () => {
   const v = verdictDispatchAccepted(
@@ -200,4 +203,34 @@ test("classifies provider or model startup errors as retryable", () => {
   );
   assert.equal(v.accepted, false);
   if (!v.accepted) assert.equal(v.retryable, true);
+});
+
+test("flags an exhausted Responses stream retry as unrecoverable worker liveness", () => {
+  const verdict = verdictWorkerLiveness({
+    title: "Pi ready",
+    preview: "",
+    tailText:
+      "Error: Retry failed after 3 attempts: OpenAI Responses stream ended before a terminal response event",
+    freshOutput: true,
+    observed: true,
+    idle: true,
+    blockedReason: null,
+  });
+
+  assert.equal(verdict.healthy, false);
+  if (!verdict.healthy) assert.match(verdict.reason, /provider Responses stream failed/i);
+});
+
+test("does not flag a transient Responses stream error while Pi is retrying", () => {
+  const verdict = verdictWorkerLiveness({
+    title: "Pi",
+    preview: "Working...",
+    tailText: "OpenAI Responses stream ended before a terminal response event\nRetrying (1/3)",
+    freshOutput: true,
+    observed: true,
+    idle: false,
+    blockedReason: null,
+  });
+
+  assert.equal(verdict.healthy, true);
 });

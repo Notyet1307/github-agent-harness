@@ -12,7 +12,8 @@ import { watch } from "./watch.js";
 import { formatStatus } from "./status.js";
 import { Ledger } from "./ledger.js";
 import { checkSetupIdle } from "./setup.js";
-import { cancelJob, cleanupJobs, type LifecycleResult } from "./lifecycle.js";
+import { cancelJob, cleanupJobs, reopenAuditFailure, type LifecycleResult } from "./lifecycle.js";
+import { cleanupHarnessDocker } from "./docker-cleanup.js";
 import {
   addProject,
   ensureHarnessRepo,
@@ -37,7 +38,8 @@ Usage:
   harness wait-merge [--config path] [--timeout-minutes N] [--poll-seconds N]
   harness recover [--config path] [--dry-run] [--execute] [--acknowledge-escalation | --reply text]
   harness cancel [--job ID] [--reason text] [--remove-worktree] [--dry-run | --execute] [--config path]
-  harness cleanup [--job ID] [--dry-run | --execute] [--config path]
+  harness reopen [--job ID] [--reason text] [--dry-run | --execute] [--config path]
+  harness cleanup [--docker] [--legacy] [--job ID] [--dry-run | --execute] [--config path]
   harness work [--config path] [--repo OWNER/REPO] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness watch [--config path] [--once] [--dry-run] [--max-cycles N] [--poll-seconds N]
   harness status [--config path]
@@ -387,15 +389,43 @@ function main(argv: string[]): number {
     return result.ok ? 0 : 1;
   }
 
+  if (cmd === "reopen") {
+    if (args.includes("--dry-run") && args.includes("--execute")) {
+      process.stderr.write("reopen accepts only one of --dry-run or --execute\n");
+      return 2;
+    }
+    const result = reopenAuditFailure({
+      configPath,
+      jobId: readFlag(args, "--job"),
+      reason: readFlag(args, "--reason"),
+      dryRun: !args.includes("--execute"),
+    });
+    printLifecycleResult(result);
+    return result.ok ? 0 : 1;
+  }
+
   if (cmd === "cleanup") {
     if (args.includes("--dry-run") && args.includes("--execute")) {
       process.stderr.write("cleanup accepts only one of --dry-run or --execute\n");
       return 2;
     }
+    const dryRun = !args.includes("--execute");
+    if (args.includes("--docker")) {
+      const ledger = new Ledger(defaultLedgerPath());
+      const selected = readFlag(args, "--job");
+      const job = selected ? ledger.getJob(selected) : null;
+      const jobs = selected ? (job ? [job] : []) : ledger.listJobs(10_000);
+      ledger.close();
+      const items = cleanupHarnessDocker(jobs, { dryRun, legacy: args.includes("--legacy") });
+      for (const item of items) {
+        process.stdout.write(`${dryRun ? "PLAN" : item.ok ? "APPLIED" : "FAIL"} docker ${item.project} job=${item.jobId} containers=${item.containers.length} volumes=${item.volumes.length} networks=${item.networks.length}: ${item.message}\n`);
+      }
+      return items.every((item) => item.ok) ? 0 : 1;
+    }
     const result = cleanupJobs({
       configPath,
       jobId: readFlag(args, "--job"),
-      dryRun: !args.includes("--execute"),
+      dryRun,
     });
     printLifecycleResult(result);
     return result.ok ? 0 : 1;

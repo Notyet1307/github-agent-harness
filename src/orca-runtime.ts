@@ -9,6 +9,7 @@ import { orcaJson, unwrapResult } from "./orca.js";
 import { execFile } from "./exec.js";
 import { HARNESS_ROOT } from "./config.js";
 import {
+  verdictWorkerLiveness,
   verdictDispatchAccepted,
   type TerminalProbeSnapshot,
 } from "./dispatch-probe.js";
@@ -1113,6 +1114,7 @@ export function waitWorkerDone(
     taskId: string;
     dispatchId: string | null;
     timeoutMs: number;
+    workerHandle?: string | null;
     onTick?: (info: string) => void;
   },
 ): {
@@ -1122,6 +1124,7 @@ export function waitWorkerDone(
   ok: false;
   error: string;
   escalated?: boolean;
+  providerFailed?: boolean;
   message?: OrchestrationMessage;
   intervention?: Omit<WorkerIntervention, "sourceState" | "role">;
 } {
@@ -1250,7 +1253,19 @@ export function waitWorkerDone(
       }
     }
 
-    // timeout / empty → continue until deadline
+    // Empty inbox → check for a terminal state that cannot recover on its own.
+    if (input.workerHandle) {
+      const liveness = verdictWorkerLiveness(
+        probeTerminal(orcaCli, input.workerHandle),
+      );
+      if (!liveness.healthy) {
+        return {
+          ok: false,
+          error: liveness.reason,
+          providerFailed: true,
+        };
+      }
+    }
     if (Date.now() >= deadline) break;
   }
 

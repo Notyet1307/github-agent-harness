@@ -863,6 +863,7 @@ function runOnceLocked(
         controllerHandle: job.controller_terminal_handle!,
         taskId: waitTaskId,
         dispatchId: waitDispatchId,
+        workerHandle: job.implementer_terminal_handle,
         timeoutMs,
         onTick: (info) => log(info),
       });

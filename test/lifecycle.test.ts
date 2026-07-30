@@ -11,7 +11,7 @@ import {
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { cancelJob, cleanupJobs } from "../src/lifecycle.js";
+import { cancelJob, cleanupJobs, reopenAuditFailure } from "../src/lifecycle.js";
 import { Ledger } from "../src/ledger.js";
 import { testProject } from "./support.js";
 
@@ -98,6 +98,61 @@ test("cleanup refuses untracked files and preserves the branch on successful rem
     "--force",
     "--json",
   ]);
+});
+
+test("reopen requires an explicit reason and repeats the final audit round after rework", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", {
+    audit_round: 3,
+    audit_head_sha: fixture.job().head_sha,
+    audit_result_json: JSON.stringify({ status: "fail" }),
+  });
+  ledger.close();
+
+  const preview = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
+  assert.equal(preview.ok, true);
+  assert.equal(preview.items[0]?.executed, false);
+  const refused = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false });
+  assert.equal(refused.ok, false);
+  const applied = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "addressed formula bypasses" });
+  assert.equal(applied.ok, true);
+  assert.equal(fixture.job().state, "reworking");
+  assert.equal(fixture.job().audit_round, 2);
+  assert.equal(fixture.job().implementer_task_id, null);
+});
+
+test("reopen skips rework when a clean committed descendant already addresses the audit", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const auditedHead = fixture.job().head_sha;
+  writeFileSync(join(fixture.worktree, "file.txt"), "post-audit fix\n");
+  git(fixture.worktree, "add", "file.txt");
+  git(fixture.worktree, "commit", "-m", "post-audit fix");
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", {
+    audit_round: 3,
+    audit_head_sha: auditedHead,
+    audit_result_json: JSON.stringify({ status: "fail" }),
+  });
+  ledger.close();
+
+  const applied = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath, dryRun: false, reason: "committed fix" });
+  assert.equal(applied.ok, true);
+  assert.equal(fixture.job().state, "awaiting_audit");
+  assert.notEqual(fixture.job().head_sha, auditedHead);
+});
+
+test("reopen refuses a failed audit that is not the configured final round", (t) => {
+  const fixture = makeFixture();
+  t.after(fixture.dispose);
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-1", { audit_round: 2, audit_head_sha: fixture.job().head_sha, audit_result_json: JSON.stringify({ status: "fail" }) });
+  ledger.close();
+  const result = reopenAuditFailure({ configPath: fixture.configPath, ledgerPath: fixture.ledgerPath, lockPath: fixture.lockPath });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /final failed audit evidence/);
 });
 
 function makeFixture(): {

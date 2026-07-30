@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { defaultLedgerPath, defaultLockPath } from "./config.js";
-import { currentBranch, revParse, statusPorcelain } from "./git.js";
+import { checkAncestor, currentBranch, revParse, statusPorcelain } from "./git.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
 import { orcaJson, requireOrcaCli } from "./orca.js";
@@ -12,7 +12,7 @@ export type LifecycleItem = {
   repo: string;
   issueNumber: number;
   state: Job["state"];
-  action: "cancel" | "remove_worktree" | "clear_missing_worktree" | "noop";
+  action: "cancel" | "reopen_audit" | "remove_worktree" | "clear_missing_worktree" | "noop";
   ok: boolean;
   message: string;
   branch?: string;
@@ -116,6 +116,83 @@ export function cancelJob(
   } finally {
     ledger.close();
     lock.release();
+  }
+}
+
+/**
+ * Human-gated escape hatch for a final audit failure with newly understood,
+ * actionable findings. Rework repeats the final audit round; it never raises
+ * the configured retry ceiling or discards the evidence that caused the block.
+ */
+export function reopenAuditFailure(
+  options: LifecycleOptions & { reason?: string },
+): LifecycleResult {
+  const dryRun = options.dryRun !== false;
+  if (!dryRun && !options.reason?.trim()) {
+    return { ok: false, message: "reopen --execute requires a non-empty --reason", items: [] };
+  }
+  const lock = acquireLock(options.lockPath ?? defaultLockPath());
+  if (!lock.ok) return { ok: false, message: lock.error ?? "lock failed", items: [] };
+  const ledger = new Ledger(options.ledgerPath ?? defaultLedgerPath());
+  try {
+    const job = options.jobId ? ledger.getJob(options.jobId) : ledger.getActiveJob();
+    if (!job) return { ok: false, message: options.jobId ? `job not found: ${options.jobId}` : "no active job", items: [] };
+    const audit = parseFailedAudit(job.audit_result_json);
+    const maxAuditRounds = loadRuntimeConfig(options.configPath).maxAuditRounds;
+    if (job.state !== "blocked" || !audit || !job.audit_head_sha || job.audit_round !== maxAuditRounds) {
+      return { ok: false, message: `job ${job.id} is not a blocked job with final failed audit evidence`, items: [item(job, "noop", false, "requires blocked failed audit evidence", false)] };
+    }
+    const reason = options.reason?.trim() || "<reason required for execute>";
+    const updatedHead = currentDescendantOfAuditedHead(job);
+    const targetState = updatedHead ? "awaiting_audit" : "reworking";
+    const auditRound = updatedHead && job.last_error?.startsWith("rework HEAD changed before rework dispatch")
+      ? job.audit_round
+      : job.audit_round - 1;
+    const plan = item(
+      job,
+      "reopen_audit",
+      true,
+      updatedHead
+        ? `repeat audit round ${job.audit_round} from already committed fix ${updatedHead.slice(0, 7)}: ${reason}`
+        : `repeat audit round ${job.audit_round} after rework: ${reason}`,
+      !dryRun,
+    );
+    if (dryRun) return { ok: true, message: "reopen audit plan", items: [plan] };
+    const reopened = ledger.updateJobIf(job.id, job.revision, {
+      state: targetState,
+      audit_round: auditRound,
+      implementer_task_id: null,
+      implementer_dispatch_id: null,
+      auditor_terminal_handle: null,
+      auditor_task_id: null,
+      auditor_dispatch_id: null,
+      dispatch_attempt: 0,
+      dispatch_probe_pending: 0,
+      head_sha: updatedHead ?? job.head_sha,
+      last_error: `reopened after failed audit r${job.audit_round}: ${reason}`,
+      intervention_resolved_at: new Date().toISOString(),
+    });
+    if (!reopened) return { ok: false, message: `job ${job.id} changed before reopen; re-run dry-run`, items: [{ ...plan, ok: false, executed: false }] };
+    return { ok: true, message: `reopened job ${job.id} for rework and repeated audit r${job.audit_round}`, items: [plan] };
+  } finally {
+    ledger.close();
+    lock.release();
+  }
+}
+
+function currentDescendantOfAuditedHead(job: Job): string | null {
+  if (!job.worktree_path || !job.audit_head_sha) return null;
+  const currentHead = revParse(job.worktree_path);
+  if (!currentHead || currentHead === job.audit_head_sha) return null;
+  const ancestry = checkAncestor(job.worktree_path, job.audit_head_sha, currentHead);
+  return ancestry.ok && ancestry.isAncestor ? currentHead : null;
+}
+
+function parseFailedAudit(value: string | null): boolean {
+  try {
+    return JSON.parse(value ?? "{}").status === "fail";
+  } catch {
+    return false;
   }
 }
 
