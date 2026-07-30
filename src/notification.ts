@@ -10,7 +10,12 @@ import { execFile, type ExecResult } from "./exec.js";
 import { parseWorkerIntervention } from "./intervention.js";
 import { Ledger } from "./ledger.js";
 import { acquireLock } from "./lock.js";
-import type { Job, NotificationConfig, WorkerIntervention } from "./types.js";
+import type {
+  Job,
+  NotificationConfig,
+  StatusNotificationEvent,
+  WorkerIntervention,
+} from "./types.js";
 
 export type NotificationResult = {
   ok: boolean;
@@ -20,6 +25,85 @@ export type NotificationResult = {
   reminderMinutes?: number;
   attempt?: number;
 };
+
+/** Send one deduplicated, opt-in lifecycle update; never retries as a reminder. */
+export function notifyStatusEvent(options: {
+  event: StatusNotificationEvent;
+  job: Job;
+  configPath?: string;
+  ledgerPath?: string;
+  lockPath?: string;
+  dryRun?: boolean;
+  exec?: NotificationExec;
+}): NotificationResult {
+  const config = loadConfig(options.configPath ?? defaultConfigPath());
+  if (!config.notifications.enabled || !config.notifications.statusEvents.includes(options.event)) {
+    return { ok: true, status: "disabled", message: "status notification disabled" };
+  }
+  const ledgerPath = options.ledgerPath ?? defaultLedgerPath();
+  const lockPath = options.lockPath ?? defaultLockPath();
+  const eventKey = statusEventKey(options.job, options.event);
+  const rendered = renderStatusNotification(options.job, options.event);
+  if (options.dryRun) return { ok: true, status: "dry_run", message: `would send ${options.event} status update`, rendered };
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const lock = acquireLock(lockPath);
+  if (!lock.ok) return { ok: false, status: "failed", message: lock.error ?? "lock busy" };
+  let attempt: number;
+  try {
+    const ledger = new Ledger(ledgerPath);
+    try {
+      const reserved = ledger.reserveNotificationAttempt({
+        eventKey,
+        jobId: options.job.id,
+        reminderMinutes: 0,
+        maxAttempts: config.notifications.maxAttemptsPerReminder,
+      });
+      if (!reserved) return { ok: true, status: "not_due", message: "status update already sent or reserved" };
+      attempt = reserved.attempts;
+    } finally { ledger.close(); }
+  } finally { lock.release(); }
+  const execution = (options.exec ?? execFile)(config.notifications.command[0]!, config.notifications.command.slice(1), {
+    input: rendered,
+    timeoutMs: config.notifications.timeoutSeconds * 1000,
+  });
+  const completionLock = acquireLock(lockPath);
+  if (!completionLock.ok) return { ok: false, status: "failed", message: "status command completed but delivery could not be recorded" };
+  try {
+    const ledger = new Ledger(ledgerPath);
+    try {
+      ledger.completeNotificationAttempt({ eventKey, reminderMinutes: 0, delivered: execution.ok, error: execution.ok ? undefined : summarizeExecFailure(execution) });
+    } finally { ledger.close(); }
+  } finally { completionLock.release(); }
+  return execution.ok
+    ? { ok: true, status: "sent", message: `${options.event} status update sent`, attempt }
+    : { ok: false, status: "failed", message: `${options.event} status update failed: ${summarizeExecFailure(execution)}`, attempt };
+}
+
+export function statusEventKey(job: Pick<Job, "id" | "revision" | "head_sha" | "pr_number">, event: StatusNotificationEvent): string {
+  return `${job.id}:status:${event}:${job.revision}:${job.head_sha ?? "-"}:${job.pr_number ?? "-"}`;
+}
+
+export function renderStatusNotification(job: Job, event: StatusNotificationEvent): string {
+  const issue = parseIssueTitle(job.issue_snapshot_json);
+  const summary: Record<StatusNotificationEvent, string> = {
+    rework_started: `审计发现需修复项，已自动开始 rework（第 ${job.audit_round} 轮）。`,
+    pr_created: `审计通过，已创建 PR：${job.pr_url ?? "unknown"}。`,
+    merged: `PR 已合并：${job.pr_url ?? "unknown"}。`,
+    issue_claimed: "已自动领取并开始实施。",
+  };
+  return [
+    "Harness 状态更新",
+    "",
+    `任务：${job.repo}#${job.issue_number}${issue ? ` ${issue}` : ""}`,
+    `事件：${event}`,
+    `状态：${job.state}`,
+    `HEAD：${job.head_sha ?? "unknown"}`,
+    summary[event],
+    "",
+    "此为进度播报；无需回复。需要介入时 Harness 会另发告警。",
+    "",
+  ].join("\n");
+}
 
 type NotificationExec = typeof execFile;
 

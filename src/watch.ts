@@ -1,10 +1,13 @@
-import { loadConfig } from "./config.js";
+import { defaultLedgerPath, loadConfig } from "./config.js";
 import { execFile } from "./exec.js";
 import type { RecoverAction } from "./reconcile.js";
 import {
   notifyActiveIntervention,
+  notifyStatusEvent,
   type NotificationResult,
 } from "./notification.js";
+import { Ledger } from "./ledger.js";
+import type { Job, StatusNotificationEvent } from "./types.js";
 import {
   WorkCoordinator,
   type WorkCycleResult,
@@ -26,6 +29,7 @@ export type WatchCycleResult = {
   plan: WatchCyclePlan;
   result?: WorkCycleResult["result"];
   notification?: NotificationResult;
+  statusNotification?: NotificationResult;
   sleptSeconds: number;
 };
 
@@ -191,7 +195,9 @@ export function runWatchCycle(opts: {
   dryRun?: boolean;
   log: (line: string) => void;
   notifyIntervention?: typeof notifyActiveIntervention;
+  notifyStatus?: typeof notifyStatusEvent;
 }): WatchCycleResult {
+  const before = readActiveJob(opts.ledgerPath);
   const coordinated = opts.coordinator.cycle({
     mode: "automatic",
     configPath: opts.configPath,
@@ -205,7 +211,11 @@ export function runWatchCycle(opts: {
   let notification: NotificationResult | undefined;
   if (
     coordinated.plan.action.kind === "resolve_intervention" ||
-    plan.step === "blocked_wait"
+    plan.step === "blocked_wait" ||
+    // A long-running action can transition the job to blocked after the plan
+    // was inspected. Notify in that same cycle instead of waiting for a later
+    // poll (or silently missing a crashed provider worker).
+    coordinated.result?.ok === false
   ) {
     notification = (opts.notifyIntervention ?? notifyActiveIntervention)({
       configPath: opts.configPath,
@@ -216,6 +226,24 @@ export function runWatchCycle(opts: {
     opts.log(
       `notification ${notification.ok ? "ok" : "fail"}: ${notification.message}`,
     );
+  }
+
+  const afterSameJob = before ? readJob(opts.ledgerPath, before.id) : null;
+  const afterActive = readActiveJob(opts.ledgerPath);
+  const statusEvent = lifecycleStatusEvent(before, afterSameJob, afterActive);
+  let statusNotification: NotificationResult | undefined;
+  if (statusEvent) {
+    statusNotification = (opts.notifyStatus ?? notifyStatusEvent)({
+      event: statusEvent.event,
+      job: statusEvent.job,
+      configPath: opts.configPath,
+      ledgerPath: opts.ledgerPath,
+      lockPath: opts.lockPath,
+      dryRun: opts.dryRun,
+    });
+    if (statusNotification.status !== "disabled") {
+      opts.log(`status notification ${statusNotification.ok ? "ok" : "fail"}: ${statusNotification.message}`);
+    }
   }
 
   if (coordinated.result) {
@@ -230,8 +258,39 @@ export function runWatchCycle(opts: {
     plan,
     result: coordinated.result,
     notification,
+    statusNotification,
     sleptSeconds: 0,
   };
+}
+
+function readActiveJob(ledgerPath?: string): Job | null {
+  const ledger = new Ledger(ledgerPath ?? defaultLedgerPath());
+  try { return ledger.getActiveJob(); } finally { ledger.close(); }
+}
+
+function readJob(ledgerPath: string | undefined, jobId: string): Job | null {
+  const ledger = new Ledger(ledgerPath ?? defaultLedgerPath());
+  try { return ledger.getJob(jobId); } finally { ledger.close(); }
+}
+
+function lifecycleStatusEvent(
+  before: Job | null,
+  afterSameJob: Job | null,
+  afterActive: Job | null,
+): { event: StatusNotificationEvent; job: Job } | null {
+  if (before && afterSameJob && before.state !== afterSameJob.state) {
+    if (afterSameJob.state === "reworking") return { event: "rework_started", job: afterSameJob };
+    if (afterSameJob.state === "awaiting_merge" && afterSameJob.pr_url) return { event: "pr_created", job: afterSameJob };
+    if (afterSameJob.state === "merged") return { event: "merged", job: afterSameJob };
+  }
+  if (
+    afterActive &&
+    (!before || afterActive.id !== before.id) &&
+    afterActive.state !== "blocked"
+  ) {
+    return { event: "issue_claimed", job: afterActive };
+  }
+  return null;
 }
 
 function sleepSeconds(seconds: number): void {

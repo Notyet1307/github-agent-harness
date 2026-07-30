@@ -96,9 +96,9 @@ mergePolicy:
 ~~~
 
 Before each request, Harness verifies a required-check rule, the PR target
-branch, and that the PR head is exactly the audited commit. It waits until
-GitHub reports the PR merge state as `CLEAN` before invoking the configured
-`gh pr merge --auto --match-head-commit --merge` command.
+branch, and that the PR head is exactly the audited commit. It requests the
+configured `gh pr merge --auto --match-head-commit --merge` command as soon as
+that safe PR exists; GitHub itself waits for required checks and reviews.
 Missing rules or a changed head block the job instead of merging another
 commit.
 
@@ -136,10 +136,11 @@ In auto mode, Harness requests:
 gh pr merge --auto --match-head-commit <audited-sha> --merge
 ~~~
 
-Harness only invokes that command after GitHub reports the required checks as
-passing; GitHub CLI may then complete the merge immediately for the matched
-head. A failed check, requested changes, a changed PR head, a closed PR, or an
-auto-merge error keeps the job visible for explicit recovery; any existing
+Harness invokes that command once the audited PR is safely verified, including
+while required checks are still running; GitHub completes the merge only when
+branch protections are met for the matched head. A failed check, requested
+changes, a changed PR head, a closed PR, or an auto-merge error keeps the job
+visible for explicit recovery; any existing
 auto-merge request is disabled when Harness observes an unsafe PR state.
 Harness does not auto-rework or jump to another issue.
 
@@ -160,9 +161,14 @@ notifications:
   timeoutSeconds: 30
   reminderMinutes: [0, 30, 120]
   maxAttemptsPerReminder: 3
+  # Optional progress updates; alerts for blocked/intervention are always on.
+  statusEvents: [rework_started, pr_created, merged, issue_claimed]
 ~~~
 
 This reuses Hermes credentials; do not copy a Telegram token into Harness.
+`statusEvents` is optional and defaults to `[]`: each selected lifecycle update
+is delivered once, without reminders, while blocked and decision-gate alerts
+continue to use the configured reminder schedule.
 Before leaving the watcher unattended, verify `hermes gateway status` and
 `hermes send --list telegram`. The notification command runs without a shell,
 is deduplicated in the ledger, and retries each reminder a bounded number of

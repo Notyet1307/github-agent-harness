@@ -233,7 +233,7 @@ test("auto mode requests GitHub auto-merge for the audited PR head", (t) => {
   }
 });
 
-test("auto mode waits for GitHub to report a clean merge state", (t) => {
+test("auto mode queues GitHub auto-merge while required checks are pending", (t) => {
   const fixture = createFixture(t, {
     prHead: "b".repeat(40),
     mergeStateStatus: "PENDING",
@@ -250,7 +250,23 @@ test("auto mode waits for GitHub to report a clean merge state", (t) => {
 
     assert.equal(result.ok, true);
     assert.match(result.message, /still awaiting_merge/);
-    assert.equal(existsSync(fixture.mergeCallsPath), false);
+    assert.deepEqual(
+      readFileSync(fixture.mergeCallsPath, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as string[]),
+      [[
+        "pr",
+        "merge",
+        "1",
+        "--repo",
+        "owner/repo",
+        "--auto",
+        "--match-head-commit",
+        "b".repeat(40),
+        "--merge",
+      ]],
+    );
     const ledger = new Ledger(fixture.ledgerPath);
     assert.equal(ledger.getJob("job-1")?.state, "awaiting_merge");
     ledger.close();

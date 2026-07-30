@@ -2,6 +2,8 @@ import { defaultLedgerPath, defaultLockPath } from "./config.js";
 import { trackedDirty } from "./audit-gate.js";
 import { execFile } from "./exec.js";
 import {
+  branchHasRequiredStatusChecks,
+  enablePullRequestAutoMerge,
   findPrByHead,
   issueStillClaimable,
   viewPullRequest,
@@ -203,12 +205,15 @@ function publishOnceLocked(
       "in-review",
     );
     log(`reusing PR #${existing.pr.number} ${existing.pr.url}`);
-    return {
-      ok: true,
-      jobId: job.id,
-      message: "PR already exists; awaiting_merge",
-      details: existing.pr,
-    };
+    return queueAutoMergeAfterPublish(
+      config,
+      ledger,
+      job,
+      repo,
+      orcaCli,
+      existing.pr,
+      "PR already exists; awaiting_merge",
+    );
   }
 
   const title = prTitle(job);
@@ -242,12 +247,21 @@ function publishOnceLocked(
         pr_url: again.pr.url,
         last_error: null,
       });
-      return {
-        ok: true,
-        jobId: job.id,
-        message: "PR found after create race; awaiting_merge",
-        details: again.pr,
-      };
+      setWorktreeProgress(
+        orcaCli,
+        worktreeId,
+        `harness: awaiting_merge PR #${again.pr.number}`,
+        "in-review",
+      );
+      return queueAutoMergeAfterPublish(
+        config,
+        ledger,
+        job,
+        repo,
+        orcaCli,
+        again.pr,
+        "PR found after create race; awaiting_merge",
+      );
     }
     return block(
       ledger,
@@ -281,18 +295,101 @@ function publishOnceLocked(
     "in-review",
   );
 
-  return {
-    ok: true,
-    jobId: job.id,
-    message: "PR created; awaiting_merge (no auto-merge)",
-    details: {
-      pr_number: prNumber,
-      pr_url: finalUrl,
+  return queueAutoMergeAfterPublish(
+    config,
+    ledger,
+    job,
+    repo,
+    orcaCli,
+    {
+      number: prNumber ?? 0,
+      url: finalUrl ?? "",
+    },
+    "PR created; awaiting_merge",
+    {
       branch,
       head_sha: headSha,
       dirty_untracked_only: dirty || "(clean)",
     },
+  );
+}
+
+/**
+ * Queue GitHub auto-merge immediately after publishing. GitHub remains the
+ * authority for pending CI and reviews; this only queues the audited head.
+ */
+function queueAutoMergeAfterPublish(
+  config: RuntimeHarnessConfig,
+  ledger: Ledger,
+  job: Job,
+  repo: RepoConfig,
+  orcaCli: string,
+  pr: { number: number; url: string },
+  message: string,
+  details: Record<string, unknown> = {},
+): PublishResult {
+  const result = (suffix?: string): PublishResult => ({
+    ok: true,
+    jobId: job.id,
+    message: suffix ? `${message}; ${suffix}` : message,
+    details: { pr_number: pr.number || job.pr_number, pr_url: pr.url || job.pr_url, ...details },
+  });
+  if (config.mergePolicy.mode !== "auto") return result();
+
+  const selector = pr.url || String(pr.number);
+  const viewed = viewPullRequest(repo, selector);
+  if (!viewed.ok || !viewed.pr) {
+    const error = `cannot verify published PR for auto-merge: ${viewed.error ?? "unknown"}`;
+    ledger.updateJob(job.id, { last_error: error });
+    return result("auto-merge verification will retry");
+  }
+  const verified = viewed.pr;
+  const unsafe = (error: string): PublishResult => {
+    const blocked = ledger.updateJob(job.id, { state: "blocked", last_error: error });
+    if (blocked.worktree_id) {
+      setWorktreeProgress(
+        orcaCli,
+        blocked.worktree_id,
+        `harness: blocked — ${error}`.slice(0, 180),
+        "in-progress",
+      );
+    }
+    return { ok: false, jobId: blocked.id, message: error, details: verified };
   };
+  if (verified.baseRefName !== repo.defaultBranch) {
+    return unsafe(
+      `PR base ${verified.baseRefName ?? "unknown"} differs from configured default branch ${repo.defaultBranch}`,
+    );
+  }
+  const branchRules = branchHasRequiredStatusChecks(repo);
+  if (!branchRules.ok) {
+    return unsafe(
+      `cannot verify required status checks: ${branchRules.error ?? "unknown"}`,
+    );
+  }
+  if (!branchRules.configured) {
+    return unsafe(
+      `auto merge requires branch-required status checks on ${repo.defaultBranch}`,
+    );
+  }
+  if (!job.head_sha || !verified.headRefOid) {
+    return unsafe("cannot verify PR head against audited head");
+  }
+  if (job.head_sha !== verified.headRefOid) {
+    return unsafe(
+      `PR head ${verified.headRefOid} differs from audited head ${job.head_sha}`,
+    );
+  }
+  if (verified.autoMergeRequest) return result("GitHub auto-merge already queued");
+
+  const requested = enablePullRequestAutoMerge(repo, verified.number, job.head_sha);
+  if (!requested.ok) {
+    const error = `GitHub auto-merge request failed: ${requested.error ?? "unknown"}`;
+    ledger.updateJob(job.id, { last_error: error });
+    return result("auto-merge request will retry");
+  }
+  ledger.updateJob(job.id, { last_error: null });
+  return result("GitHub auto-merge queued");
 }
 
 function block(

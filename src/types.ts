@@ -44,7 +44,15 @@ export type NotificationConfig = {
   timeoutSeconds: number;
   reminderMinutes: number[];
   maxAttemptsPerReminder: number;
+  /** Optional non-blocking lifecycle updates for an unattended operator. */
+  statusEvents: StatusNotificationEvent[];
 };
+
+export type StatusNotificationEvent =
+  | "rework_started"
+  | "pr_created"
+  | "merged"
+  | "issue_claimed";
 
 /** Stable role in the pipeline — not a product brand. */
 export type AgentRole = "implementer" | "auditor";

@@ -221,6 +221,22 @@ test("flags an exhausted Responses stream retry as unrecoverable worker liveness
   if (!verdict.healthy) assert.match(verdict.reason, /provider Responses stream failed/i);
 });
 
+test("flags an exhausted overloaded provider retry as unrecoverable worker liveness", () => {
+  const verdict = verdictWorkerLiveness({
+    title: "Pi ready",
+    preview: "",
+    tailText:
+      "Error: Retry failed after 3 attempts: OpenAI API error (502): overloaded_error",
+    freshOutput: true,
+    observed: true,
+    idle: true,
+    blockedReason: null,
+  });
+
+  assert.equal(verdict.healthy, false);
+  if (!verdict.healthy) assert.match(verdict.reason, /provider request failed/i);
+});
+
 test("does not flag a transient Responses stream error while Pi is retrying", () => {
   const verdict = verdictWorkerLiveness({
     title: "Pi",
