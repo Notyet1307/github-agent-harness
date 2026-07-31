@@ -716,6 +716,15 @@ function runAuditPhase(
       workerHandle: job.auditor_terminal_handle,
       timeoutMs: config.auditTimeoutMinutes * 60_000,
       onTick: (info) => log(info),
+      onNoMatchingMessage: () => {
+        const late = loadAuditResult(resultPath);
+        if (!late.ok || !late.result) return false;
+        return (
+          orchestrationTaskStatus(orcaCli, waitTaskId)?.toLowerCase() ===
+            "completed" &&
+          auditResultMatchesShas(late.result, baseSha, headSha)
+        );
+      },
     });
     const reacquired = acquireLock(waitLock.lockPath);
     if (!reacquired.ok) {
@@ -772,6 +781,10 @@ function runAuditPhase(
         }
         return { ok: false, jobId: job.id, message: done.error };
       }
+      log(
+        "worker_done missing but same-round task completed with a valid result; continuing",
+      );
+    } else if (done.recovered) {
       log(
         "worker_done missing but same-round task completed with a valid result; continuing",
       );

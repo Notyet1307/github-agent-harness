@@ -1121,10 +1121,13 @@ export function waitWorkerDone(
     timeoutMs: number;
     workerHandle?: string | null;
     onTick?: (info: string) => void;
+    /** Safe completion evidence observed after an empty/unmatched inbox slice. */
+    onNoMatchingMessage?: () => boolean;
   },
 ): {
   ok: true;
-  message: OrchestrationMessage;
+  message: OrchestrationMessage | null;
+  recovered?: boolean;
 } | {
   ok: false;
   error: string;
@@ -1256,6 +1259,10 @@ export function waitWorkerDone(
       if (type === "worker_done" && taskMatches && dispatchMatches) {
         return { ok: true, message: msg };
       }
+    }
+
+    if (input.onNoMatchingMessage?.()) {
+      return { ok: true, message: null, recovered: true };
     }
 
     // Empty inbox → check for a terminal state that cannot recover on its own.
