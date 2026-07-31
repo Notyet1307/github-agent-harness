@@ -1123,6 +1123,11 @@ export function waitWorkerDone(
     onTick?: (info: string) => void;
     /** Safe completion evidence observed after an empty/unmatched inbox slice. */
     onNoMatchingMessage?: () => boolean;
+    /**
+     * Cancels an obsolete controller wait between inbox slices. The caller
+     * owns the lifecycle predicate and returns a user-safe reason.
+     */
+    shouldAbort?: () => string | null;
   },
 ): {
   ok: true;
@@ -1138,6 +1143,10 @@ export function waitWorkerDone(
 } {
   const deadline = Date.now() + input.timeoutMs;
   while (Date.now() < deadline) {
+    const abortReason = input.shouldAbort?.();
+    if (abortReason) {
+      return { ok: false, error: abortReason };
+    }
     const slice = Math.min(60_000, Math.max(5_000, deadline - Date.now()));
     input.onTick?.(
       `waiting worker_done (slice ${Math.round(slice / 1000)}s, task ${input.taskId})`,

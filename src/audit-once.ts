@@ -708,6 +708,18 @@ function runAuditPhase(
     const waitRevision = job.revision;
     const waitTaskId = job.auditor_task_id!;
     const waitDispatchId = job.auditor_dispatch_id;
+    const auditWaitChanged = (): string | null => {
+      const current = ledger.getJob(job.id);
+      return !current ||
+        current.revision !== waitRevision ||
+        current.state !== "auditing" ||
+        current.auditor_task_id !== waitTaskId ||
+        current.auditor_dispatch_id !== waitDispatchId ||
+        current.audit_round !== round ||
+        current.audit_head_sha !== headSha
+        ? "job changed while waiting for audit; retry coordination cycle"
+        : null;
+    };
     waitLock.releaseLock();
     const done = waitWorkerDone(orcaCli, {
       controllerHandle: job.controller_terminal_handle!,
@@ -716,6 +728,7 @@ function runAuditPhase(
       workerHandle: job.auditor_terminal_handle,
       timeoutMs: config.auditTimeoutMinutes * 60_000,
       onTick: (info) => log(info),
+      shouldAbort: auditWaitChanged,
       onNoMatchingMessage: () => {
         const late = loadAuditResult(resultPath);
         if (!late.ok || !late.result) return false;
@@ -1334,6 +1347,16 @@ function runReworkPhase(
   const waitRevision = job.revision;
   const waitTaskId = job.implementer_task_id!;
   const waitDispatchId = job.implementer_dispatch_id;
+  const reworkWaitChanged = (): string | null => {
+    const current = ledger.getJob(job.id);
+    return !current ||
+      current.revision !== waitRevision ||
+      current.state !== "reworking" ||
+      current.implementer_task_id !== waitTaskId ||
+      current.implementer_dispatch_id !== waitDispatchId
+      ? "job changed while waiting for rework; retry coordination cycle"
+      : null;
+  };
   waitLock.releaseLock();
   const done = waitWorkerDone(orcaCli, {
     controllerHandle: job.controller_terminal_handle!,
@@ -1342,6 +1365,7 @@ function runReworkPhase(
     workerHandle: job.implementer_terminal_handle,
     timeoutMs: config.implementTimeoutMinutes * 60_000,
     onTick: (info) => log(info),
+    shouldAbort: reworkWaitChanged,
   });
   const reacquired = acquireLock(waitLock.lockPath);
   if (!reacquired.ok) {
