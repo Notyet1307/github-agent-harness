@@ -114,13 +114,15 @@ export function ensureIssueWorktree(
   orcaCli: string,
   repo: RepoConfig,
   issueNumber: number,
+  jobId: string,
   profile: AgentProfile,
 ):
   | { ok: true; value: WorktreeCreateResult }
   | { ok: false; error: string; retryable?: boolean } {
-  const name = `issue-${issueNumber}`;
+  const name = worktreeInstanceName(issueNumber, jobId);
 
-  // Reuse existing worktree for this issue if present.
+  // Reuse only this exact execution instance. A cancelled job may intentionally
+  // retain an older worktree for inspection, including for the same Issue.
   const listed = orcaJson(orcaCli, [
     "worktree",
     "list",
@@ -204,16 +206,13 @@ export function ensureIssueWorktree(
   }
   const matches = listResult.worktrees.filter(
     (worktree) =>
-      worktree.linkedIssue === issueNumber ||
-      (worktree.linkedIssue == null &&
-        (worktree.displayName === name ||
-          basename(worktree.path) === name)),
+      worktree.displayName === name || basename(worktree.path) === name,
   );
   if (matches.length > 1) {
     return {
       ok: false,
       error:
-        `multiple worktrees match issue #${issueNumber}: ` +
+        `multiple worktrees match job ${jobId}: ` +
         matches.map((worktree) => worktree.id).join(", "),
     };
   }
@@ -223,7 +222,7 @@ export function ensureIssueWorktree(
       return {
         ok: false,
         error:
-          `completed worktree already exists for issue #${issueNumber}: ` +
+          `completed worktree already exists for job ${jobId}: ` +
           existing.id,
       };
     }
@@ -231,7 +230,7 @@ export function ensureIssueWorktree(
       orcaCli,
       existing.id,
       profile,
-      `issue-${issueNumber}-${profile.orcaAgent}`,
+      `${name}-${profile.orcaAgent}`,
     );
     return {
       ok: true,
@@ -291,7 +290,7 @@ export function ensureIssueWorktree(
     orcaCli,
     worktreeId,
     profile,
-    `issue-${issueNumber}-${profile.orcaAgent}`,
+    `${name}-${profile.orcaAgent}`,
   );
 
   return {
@@ -304,6 +303,12 @@ export function ensureIssueWorktree(
       raw: created.data,
     },
   };
+}
+
+export function worktreeInstanceName(issueNumber: number, jobId: string): string {
+  const suffix = jobId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 8);
+  if (!suffix) throw new Error("job ID must contain an alphanumeric character");
+  return `issue-${issueNumber}-${suffix}`;
 }
 
 /** Start or reuse an agent terminal inside an existing worktree. */
