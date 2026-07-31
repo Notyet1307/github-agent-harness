@@ -134,6 +134,9 @@ pnpm harness watch --poll-seconds 30
 After GitHub or a human merges the PR, the next watcher tick marks the job
 merged, releases the slot, and claims the next eligible issue. Run only one
 controller at a time and never run the same configured work from two machines.
+The ledger lock serializes individual coordination actions; it is not a
+single-watcher supervisor. Stop an existing watcher before starting another
+one for the same configuration.
 
 In auto mode, Harness requests:
 
@@ -230,6 +233,13 @@ If a post-audit rework worker times out without producing a new commit,
 the worktree is still clean at the audited commit, and the audit evidence is
 still current. After reviewing that plan, use `recover --execute` to retry the
 rework. `watch` does not retry this case automatically.
+
+If Orca briefly reports a completed rework as `dispatched`, Harness remains
+fail-closed. `recover --dry-run` may propose a fresh audit only when the exact
+stale status was recorded, the rework task is now confirmed completed, HEAD is
+a clean descendant of the audited commit, and the prior audit artifact is
+stale. Review that plan, then use `recover --execute`; an arbitrary blocked job
+can never use this path to bypass an audit.
 
 ### Clean terminal worktrees
 
