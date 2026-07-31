@@ -1273,6 +1273,53 @@ test("recover explicitly re-audits validation-only rework without a new commit",
   );
 });
 
+test("recover re-audits a completed rework after a stale dispatched-task observation", (t) => {
+  const fixture = createAuditFixture(actionableAuditFailure, "rework-commit");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markReworking(fixture);
+
+  writeFileSync(join(fixture.worktree, "value.txt"), "completed rework\n");
+  git(fixture.worktree, "add", "value.txt");
+  git(fixture.worktree, "commit", "-m", "completed rework");
+  const reworkedHead = git(fixture.worktree, "rev-parse", "HEAD");
+  // The completed rework is now historical; subsequent Orca calls model the
+  // newly dispatched audit rather than asking the fixture to perform rework.
+  writeFileSync(join(fixture.dir, "mode"), "audit-retry");
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error:
+      "rework task task-rework is not completed (Orca status=dispatched)",
+  });
+  ledger.close();
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.ok, true, recovered.message);
+  assert.equal(recovered.action.kind, "audit_once");
+  if (recovered.action.kind === "audit_once") {
+    assert.equal(recovered.action.recovery, "resume_completed_rework");
+  }
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 2);
+  assert.equal(verified.getJob("job-audit")?.audit_head_sha, reworkedHead);
+  assert.equal(verified.getJob("job-audit")?.auditor_task_id, "task-audit-new");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
 test("recover explicitly redispatches a timed-out rework after its stale task fails", (t) => {
   const fixture = createAuditFixture(
     actionableAuditFailure,

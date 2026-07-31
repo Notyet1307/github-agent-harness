@@ -138,6 +138,32 @@ test("M5 stage matrix maps to ensure* actions", () => {
   }
 });
 
+test("completed rework recovers only from a stale dispatched-task observation", () => {
+  const job = {
+    id: "x", repo: "o/r", issue_number: 1, issue_url: "u", issue_updated_at: "t",
+    issue_snapshot_json: "{}", state: "blocked" as const, base_ref: "origin/main",
+    base_sha: "base", branch: "br", worktree_id: "w", worktree_path: "/tmp",
+    implementer_profile_id: null, implementer_terminal_handle: null, implementer_task_id: "task-1",
+    implementer_dispatch_id: "dispatch-1", auditor_profile_id: null, auditor_terminal_handle: null,
+    auditor_task_id: null, auditor_dispatch_id: null, dispatch_attempt: 0, dispatch_probe_pending: 0,
+    controller_terminal_handle: null, audit_round: 2, audit_result_json: "{}",
+    audit_head_sha: "audited", pr_number: null, pr_url: null, merged_at: null,
+    last_error: "rework task task-1 is not completed (Orca status=dispatched)",
+    head_sha: "audited", created_at: "t", updated_at: "t",
+  };
+  const hints = {
+    worktreeExists: true, currentHeadSha: "new-head", hasCommitsSinceBase: true,
+    baseIsAncestor: true, trackedClean: true, auditArtifactStatus: "stale" as const,
+    implementTaskStatus: "completed",
+  };
+  const action = reconcileJob(job, hints);
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "resume_completed_rework");
+  }
+  assert.equal(reconcileJob({ ...job, last_error: "other block" }, hints).kind, "blocked");
+});
+
 test("ledger fixture: active implementing blocks new claim", () => {
   const dir = mkdtempSync(join(tmpdir(), "harness-m5-"));
   const dbPath = join(dir, "h.sqlite");

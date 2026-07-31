@@ -19,6 +19,7 @@ import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   classifyRecoverExecution,
   isTimedOutReworkWithoutNewCommit,
+  isStaleReworkTaskStatusError,
   reconcileJob,
   REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
   type RecoverAction,
@@ -233,6 +234,31 @@ export function runRecoveryCycle(options: {
       }
       if (
         !recoveryError &&
+        action.recovery === "resume_completed_rework" &&
+        job.worktree_path &&
+        head
+      ) {
+        if (!job.implementer_task_id || !job.audit_head_sha) {
+          recoveryError = "cannot resume completed rework without task and audited-HEAD provenance";
+        } else if (!isStaleReworkTaskStatusError(job.last_error)) {
+          recoveryError = "completed rework recovery requires the stale dispatched-task error";
+        } else if (hints.implementTaskStatus?.toLowerCase() !== "completed") {
+          recoveryError = "cannot resume completed rework before the task is confirmed completed";
+        } else if (head === job.audit_head_sha) {
+          recoveryError = "completed rework recovery requires a commit after the audited HEAD";
+        } else if (hints.trackedClean !== true) {
+          recoveryError = "completed rework recovery requires a clean worktree";
+        } else {
+          const ancestry = checkAncestor(job.worktree_path, job.audit_head_sha, head);
+          if (!ancestry.ok || !ancestry.isAncestor) {
+            recoveryError = ancestry.ok
+              ? "completed rework HEAD is not a descendant of the audited HEAD"
+              : `cannot verify completed rework ancestry: ${ancestry.error}`;
+          }
+        }
+      }
+      if (
+        !recoveryError &&
         action.recovery === "retry_validation_only_rework" &&
         job.worktree_path &&
         job.base_sha &&
@@ -327,11 +353,13 @@ export function runRecoveryCycle(options: {
       } else if (
         action.recovery === "retry_malformed_result" ||
         action.recovery === "retry_validation_only_rework" ||
-        action.recovery === "retry_stale_result"
+        action.recovery === "retry_stale_result" ||
+        action.recovery === "resume_completed_rework"
       ) {
         ledger.updateJob(job.id, {
           state:
-            action.recovery === "retry_validation_only_rework"
+            action.recovery === "retry_validation_only_rework" ||
+            action.recovery === "resume_completed_rework"
               ? "awaiting_audit"
               : "auditing",
           auditor_terminal_handle: null,
