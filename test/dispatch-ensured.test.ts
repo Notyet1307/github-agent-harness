@@ -151,6 +151,20 @@ test("accepts task provenance alone for a legacy dispatch without an id", () => 
   assert.equal(result.ok, true);
 });
 
+test("abandons an obsolete worker wait before polling Orca again", () => {
+  const result = waitWorkerDone("not-an-executable", {
+    controllerHandle: "controller-1",
+    taskId: "task-current",
+    dispatchId: "dispatch-current",
+    timeoutMs: 1_000,
+    shouldAbort: () => "job changed while waiting for audit; retry coordination cycle",
+  });
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error, "job changed while waiting for audit; retry coordination cycle");
+});
+
 test("rejects a dispatch response without a dispatch id", () => {
   const fake = makeFakeOrca("missing-dispatch-id");
   const result = dispatchTaskEnsured(fake.command, {
