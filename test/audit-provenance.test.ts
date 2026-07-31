@@ -1266,7 +1266,7 @@ test("recover explicitly redispatches a malformed completed audit", (t) => {
 });
 
 test("recover explicitly redispatches an auditor that exhausted provider retries without a result", (t) => {
-  const fixture = createAuditFixture(null, "audit-provider-retry");
+  const fixture = createAuditFixture(() => null, "audit-provider-retry");
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
   markCompletedAudit(fixture);
 
