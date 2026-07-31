@@ -22,7 +22,10 @@ import { acquireLock } from "./lock.js";
 import { pickForRepo } from "./picker.js";
 import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import { renderImplementerSpec } from "./prompts.js";
-import { IMPLEMENT_NO_COMMITS_ERROR } from "./reconcile.js";
+import {
+  IMPLEMENT_NO_COMMITS_ERROR,
+  isStaleImplementationTaskStatusError,
+} from "./reconcile.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import {
   dispatchTaskEnsured,
@@ -128,7 +131,8 @@ function runOnceLocked(
     (!job ||
       job.id !== blockedRecovery.jobId ||
       job.state !== "blocked" ||
-      job.last_error !== IMPLEMENT_NO_COMMITS_ERROR ||
+      (job.last_error !== IMPLEMENT_NO_COMMITS_ERROR &&
+        !isStaleImplementationTaskStatusError(job.last_error)) ||
       job.implementer_task_id !== blockedRecovery.taskId ||
       job.implementer_dispatch_id !== blockedRecovery.dispatchId)
   ) {

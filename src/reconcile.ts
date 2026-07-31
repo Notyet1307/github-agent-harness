@@ -26,6 +26,18 @@ export function isStaleReworkTaskStatusError(error: string | null): boolean {
   );
 }
 
+/** A completed implementation can race a transient dispatched-task observation. */
+export function isStaleImplementationTaskStatusError(
+  error: string | null,
+): boolean {
+  return Boolean(
+    error &&
+      /^implementation task \S+ is not completed \(Orca status=dispatched\)$/.test(
+        error,
+      ),
+  );
+}
+
 /**
  * Pi has already consumed its own bounded provider retries. This is distinct
  * from an audit finding: no result was produced, so a fresh auditor is needed
@@ -208,7 +220,8 @@ export function reconcileJob(
         hints.implementTaskStatus?.toLowerCase() ?? "";
       const implementationEnded = Boolean(
         job.implementer_task_id &&
-        job.last_error === IMPLEMENT_NO_COMMITS_ERROR &&
+        (job.last_error === IMPLEMENT_NO_COMMITS_ERROR ||
+          isStaleImplementationTaskStatusError(job.last_error)) &&
         hints.worktreeExists === true &&
         ["completed", "failed"].includes(implementTaskStatus),
       );
