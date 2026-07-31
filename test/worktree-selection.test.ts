@@ -12,7 +12,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Ledger } from "../src/ledger.js";
-import { ensureIssueWorktree } from "../src/orca-runtime.js";
+import { ensureIssueWorktree, worktreeInstanceName } from "../src/orca-runtime.js";
 import { runOnce } from "../src/run-once.js";
 import type { AgentProfile, RepoConfig } from "../src/types.js";
 
@@ -102,13 +102,32 @@ test("selects issue-1 exactly when issue-10 is listed first", (t) => {
   );
   t.after(() => rmSync(fake.dir, { recursive: true, force: true }));
 
-  const result = ensureIssueWorktree(fake.command, repo, 1, profile);
+  const result = ensureIssueWorktree(fake.command, repo, 1, "job-1", profile);
 
   assert.equal(result.ok, true);
   if (result.ok) {
-    assert.equal(result.value.worktreeId, "repo-1::/tmp/issue-1");
-    assert.equal(result.value.worktreePath, "/tmp/issue-1");
+    assert.equal(result.value.worktreeId, "repo-1::/tmp/issue-1-job1");
+    assert.equal(result.value.worktreePath, "/tmp/issue-1-job1");
   }
+});
+
+test("creates a fresh job-scoped worktree instead of reusing a retired same-issue worktree", (t) => {
+  const retired = {
+    id: "repo-1::/tmp/issue-1-retired",
+    path: "/tmp/issue-1-retired",
+    displayName: "issue-1-retired",
+    linkedIssue: 1,
+    workspaceStatus: "completed",
+  };
+  const fake = makeFakeOrca(completeList([retired]));
+  t.after(() => rmSync(fake.dir, { recursive: true, force: true }));
+
+  const result = ensureIssueWorktree(fake.command, repo, 1, "job-1", profile);
+
+  assert.equal(result.ok, true);
+  assert.equal(hasCall(fake.calls(), "worktree", "create"), true);
+  const create = fake.calls().find((args) => args[0] === "worktree" && args[1] === "create")!;
+  assert.equal(create[create.indexOf("--name") + 1], "issue-1-job1");
 });
 
 test("blocks when more than one worktree matches the issue", (t) => {
@@ -126,11 +145,11 @@ test("blocks when more than one worktree matches the issue", (t) => {
   );
   t.after(() => rmSync(fake.dir, { recursive: true, force: true }));
 
-  const result = ensureIssueWorktree(fake.command, repo, 1, profile);
+  const result = ensureIssueWorktree(fake.command, repo, 1, "job-1", profile);
 
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.match(result.error, /multiple worktrees.*issue #1/i);
+    assert.match(result.error, /multiple worktrees.*job job-1/i);
     assert.match(result.error, /issue-1-a.*issue-1-b/);
   }
   assert.equal(hasCall(fake.calls(), "terminal"), false);
@@ -166,7 +185,7 @@ test("blocks incomplete or invalid Orca worktree snapshots", () => {
   for (const fixture of cases) {
     const fake = makeFakeOrca(fixture.response);
     try {
-      const result = ensureIssueWorktree(fake.command, repo, 1, profile);
+      const result = ensureIssueWorktree(fake.command, repo, 1, "job-1", profile);
       assert.equal(result.ok, false);
       if (!result.ok) assert.match(result.error, fixture.error);
       assert.equal(hasCall(fake.calls(), "worktree", "create"), false);
@@ -202,7 +221,7 @@ test("runOnce keeps a completed worktree collision blocked", (t) => {
   });
 
   assert.equal(first.ok, false);
-  assert.match(first.message, /completed worktree.*issue #1/i);
+  assert.match(first.message, /completed worktree.*job job-1/i);
   assert.equal(second.ok, false);
   assert.match(second.message, /job is blocked/i);
   const verified = new Ledger(fixture.ledgerPath);
@@ -224,9 +243,9 @@ function listedWorktree(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
-    id: `repo-1::/tmp/issue-${issue}`,
-    path: `/tmp/issue-${issue}`,
-    displayName: `issue-${issue}`,
+    id: `repo-1::/tmp/${worktreeInstanceName(issue, "job-1")}`,
+    path: `/tmp/${worktreeInstanceName(issue, "job-1")}`,
+    displayName: worktreeInstanceName(issue, "job-1"),
     linkedIssue: issue,
     workspaceStatus: "in-progress",
     ...overrides,
@@ -384,9 +403,9 @@ if (args[0] === "status") {
   if (response.ok === false) process.exitCode = 1;
 } else if (key === "worktree create") {
   ok({ worktree: {
-    id: "repo-1::/tmp/issue-1",
-    path: "/tmp/issue-1",
-    branch: "refs/heads/issue-1"
+    id: "repo-1::/tmp/issue-1-job1",
+    path: "/tmp/issue-1-job1",
+    branch: "refs/heads/issue-1-job1"
   } });
 } else if (key === "terminal list" && args.some((arg) => arg.startsWith("path:"))) {
   ok({ terminals: [{

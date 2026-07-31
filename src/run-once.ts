@@ -422,6 +422,7 @@ function runOnceLocked(
       orcaCli,
       repo,
       job.issue_number,
+      job.id,
       implementer,
     );
     if (!wt.ok) {
@@ -463,7 +464,7 @@ function runOnceLocked(
     }
     const baseSha = expectedBaseSha;
 
-    const desiredBranch = `agent/issue-${job.issue_number}`;
+    const desiredBranch = `agent/issue-${job.issue_number}-${job.id.slice(0, 8)}`;
     const branchResult = ensureBranch(wt.value.worktreePath, desiredBranch);
     if (!branchResult.ok) {
       job = ledger.updateJob(job.id, {

@@ -25,6 +25,11 @@ The controller runs in the foreground. It does not install a background service.
 Completed or cancelled worktrees are removed only by the explicit, dry-run-first
 `cleanup` command.
 
+Each claim is an execution instance. Harness derives a unique branch and Orca
+worktree name from the Issue number and job ID (for example,
+`issue-36-46f891cd`). A cancelled instance may remain for inspection, but is
+never reused by a later claim of the same Issue.
+
 ## Configure
 
 ### 1. Install the local prerequisites
