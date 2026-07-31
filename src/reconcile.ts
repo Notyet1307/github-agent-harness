@@ -18,6 +18,14 @@ export function isTimedOutReworkWithoutNewCommit(
   );
 }
 
+/** A completed rework can race a transient dispatched-task observation. */
+export function isStaleReworkTaskStatusError(error: string | null): boolean {
+  return Boolean(
+    error &&
+      /^rework task \S+ is not completed \(Orca status=dispatched\)$/.test(error),
+  );
+}
+
 /**
  * Pure recovery routing for M5.
  * Controllers map each non-terminal state to the next safe command.
@@ -35,7 +43,8 @@ export type RecoverAction =
         | "retry_malformed_result"
         | "retry_stuck_rework"
         | "retry_validation_only_rework"
-        | "retry_stale_result";
+        | "retry_stale_result"
+        | "resume_completed_rework";
     }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
@@ -257,6 +266,27 @@ export function reconcileJob(
           reason:
             "completed audit produced a malformed result; explicit recovery may dispatch a fresh auditor",
           recovery: "retry_malformed_result",
+        };
+      }
+      if (
+        job.implementer_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha &&
+        isStaleReworkTaskStatusError(job.last_error) &&
+        typeof hints.currentHeadSha === "string" &&
+        hints.currentHeadSha !== job.audit_head_sha &&
+        hints.worktreeExists === true &&
+        hints.hasCommitsSinceBase === true &&
+        hints.auditArtifactStatus === "stale" &&
+        hints.implementTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "completed rework followed a stale dispatched-task observation; explicit recovery may re-audit the clean descendant",
+          recovery: "resume_completed_rework",
         };
       }
       if (
