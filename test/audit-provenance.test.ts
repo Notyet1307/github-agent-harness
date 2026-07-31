@@ -59,7 +59,8 @@ type AuditFixtureMode =
   | "audit-lost-worker-done"
   | "audit-retry-lock-wait"
   | "audit-retry-artifact-race"
-  | "audit-infra-retry";
+  | "audit-infra-retry"
+  | "audit-provider-retry";
 
 test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) => {
   const fixture = createAuditFixture((baseSha, headSha) =>
@@ -1264,6 +1265,52 @@ test("recover explicitly redispatches a malformed completed audit", (t) => {
   );
 });
 
+test("recover explicitly redispatches an auditor that exhausted provider retries without a result", (t) => {
+  const fixture = createAuditFixture(() => null, "audit-provider-retry");
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markCompletedAudit(fixture);
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "blocked",
+    last_error: "provider request failed after Pi exhausted its retries",
+  });
+  ledger.close();
+
+  const dryRun = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: true,
+  });
+  assert.equal(dryRun.action.kind, "audit_once");
+  if (dryRun.action.kind === "audit_once") {
+    assert.equal(dryRun.action.recovery, "retry_exhausted_provider");
+  }
+  assert.equal(dryRun.executed, false);
+  assert.equal(existsSync(join(fixture.worktree, ".harness", "audit-result.json")), false);
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+
+  assert.equal(recovered.ok, true, recovered.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  assert.equal(verified.getJob("job-audit")?.audit_round, 1);
+  assert.equal(verified.getJob("job-audit")?.auditor_task_id, "task-audit-new");
+  verified.close();
+  assert.equal(
+    readCalls(fixture.callsPath).filter(
+      (args) => args[0] === "orchestration" && args[1] === "task-create",
+    ).length,
+    1,
+  );
+});
+
 test("recover explicitly re-audits validation-only rework without a new commit", (t) => {
   const fixture = createAuditFixture(actionableAuditFailure, "audit-retry");
   t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
@@ -1573,12 +1620,16 @@ const reworkMode = mode.startsWith("rework-");
 const auditRetryMode = mode.startsWith("audit-retry");
 const lostAuditWorkerDoneMode = mode === "audit-lost-worker-done";
 const auditInfrastructureRetryMode = mode === "audit-infra-retry";
+const auditProviderRetryMode = mode === "audit-provider-retry";
 const stuckReworkRetryMode =
   mode === "rework-stuck-retry" ||
   mode === "rework-stuck-artifact-race" ||
   mode === "rework-stuck-task-race";
 const freshAuditMode =
-  auditRetryMode || lostAuditWorkerDoneMode || auditInfrastructureRetryMode;
+  auditRetryMode ||
+  lostAuditWorkerDoneMode ||
+  auditInfrastructureRetryMode ||
+  auditProviderRetryMode;
 const statePath = join(dir, "state.json");
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const key = args.slice(0, 2).join(" ");
@@ -1715,7 +1766,10 @@ if (args[0] === "status") {
   }
   console.log(JSON.stringify({ ok: true, result: {
     tasks: [
-      { id: "task-audit", status: "completed" },
+      {
+        id: "task-audit",
+        status: auditProviderRetryMode ? "dispatched" : "completed",
+      },
       ...(lostAuditWorkerDoneMode
         ? [{ id: "task-audit-new", status: "completed" }]
         : []),

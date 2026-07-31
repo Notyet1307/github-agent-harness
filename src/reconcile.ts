@@ -27,6 +27,20 @@ export function isStaleReworkTaskStatusError(error: string | null): boolean {
 }
 
 /**
+ * Pi has already consumed its own bounded provider retries. This is distinct
+ * from an audit finding: no result was produced, so a fresh auditor is needed
+ * once the provider is healthy again.
+ */
+export function isExhaustedAuditProviderError(error: string | null): boolean {
+  return Boolean(
+    error &&
+      /^(?:provider request|provider Responses stream) failed after Pi exhausted its retries$/.test(
+        error,
+      ),
+  );
+}
+
+/**
  * Pure recovery routing for M5.
  * Controllers map each non-terminal state to the next safe command.
  * Side effects stay in ensure* / *Once implementations.
@@ -44,7 +58,8 @@ export type RecoverAction =
         | "retry_stuck_rework"
         | "retry_validation_only_rework"
         | "retry_stale_result"
-        | "resume_completed_rework";
+        | "resume_completed_rework"
+        | "retry_exhausted_provider";
     }
   | { kind: "publish_once"; reason: string }
   | { kind: "wait_merge"; reason: string }
@@ -250,6 +265,28 @@ export function reconcileJob(
           kind: "publish_once",
           reason:
             "blocked push has current completed audit evidence; retry publishing",
+        };
+      }
+      if (
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        job.head_sha === hints.currentHeadSha &&
+        isExhaustedAuditProviderError(job.last_error) &&
+        hints.auditArtifactStatus === "missing" &&
+        hints.auditResultReady === false &&
+        ["dispatched", "failed"].includes(
+          hints.auditTaskStatus?.toLowerCase() ?? "",
+        ) &&
+        hints.worktreeExists === true &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "auditor exhausted provider retries without a result; explicit recovery may dispatch a fresh auditor for the same HEAD",
+          recovery: "retry_exhausted_provider",
         };
       }
       if (
