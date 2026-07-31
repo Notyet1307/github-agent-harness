@@ -432,7 +432,8 @@ repositories:
     implementer_task_id: "task-old",
     implementer_dispatch_id: "dispatch-old",
     dispatch_attempt: 1,
-    last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    last_error:
+      "implementation task task-old is not completed (Orca status=dispatched)",
   });
   ledger.close();
 
@@ -650,7 +651,8 @@ repositories:
     implementer_task_id: "task-old",
     implementer_dispatch_id: "dispatch-old",
     dispatch_attempt: 1,
-    last_error: IMPLEMENT_NO_COMMITS_ERROR,
+    last_error:
+      "implementation task task-old is not completed (Orca status=dispatched)",
   });
   finalizableLedger.close();
   writeFileSync(modePath, "success");

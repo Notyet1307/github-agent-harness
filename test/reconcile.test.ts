@@ -267,6 +267,26 @@ test("completed implementation with clean commits can be finalized", () => {
   assert.equal(a.kind, "finalize_implement");
 });
 
+test("completed implementation recovers after a stale dispatched-task observation", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      last_error:
+        "implementation task task-implement is not completed (Orca status=dispatched)",
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      implementTaskStatus: "completed",
+    },
+  );
+
+  assert.equal(a.kind, "finalize_implement");
+});
+
 test("completed implementation with divergent HEAD cannot be finalized", () => {
   const a = reconcileJob(
     job({
