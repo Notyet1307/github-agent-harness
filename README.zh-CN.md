@@ -119,6 +119,8 @@ pnpm harness watch --poll-seconds 30
 
 GitHub 或人工合并 PR 后，下一次 watcher tick 会记录 merged、释放单槽，并领取下一个
 合格 issue。不要同时启动多个 controller，也不要让两台电脑并行处理同一组任务。
+ledger lock 只串行化单次协调动作，并不是 watcher 的单例守护器；同一份配置启动新
+watcher 前，必须先停止已有 watcher。
 
 auto 模式实际请求的是：
 
@@ -197,6 +199,11 @@ worktree 仍干净地停留在已审计提交、审计证据仍然有效时，
 `recover --dry-run` 才会提出重新派发计划。审查计划后，使用
 `recover --execute` 重试返工；`watch` 不会自动重试这种情况。
 
+如果 Orca 曾短暂把已完成的返工显示为 `dispatched`，Harness 仍会 fail-closed。
+只有记录了该精确的旧状态、返工 task 现已确认完成、HEAD 是已审计提交的干净后代，
+且先前审计 artifact 已过期时，`recover --dry-run` 才可能提出重新审计计划。审查后再
+执行 `recover --execute`；任意 blocked job 都不能借此绕过审计。
+
 ### 清理终态 worktree
 
 先预览已合并和已取消 job 的清理计划，再执行：
@@ -204,12 +211,23 @@ worktree 仍干净地停留在已审计提交、审计证据仍然有效时，
 ~~~bash
 pnpm harness cleanup --dry-run
 pnpm harness cleanup --job JOB_ID --execute
+pnpm harness cleanup --docker --dry-run
+pnpm harness cleanup --docker --legacy --dry-run
+pnpm harness reopen --job JOB_ID --dry-run
 ~~~
 
 Cleanup 不会处理活动 job，也不会删除分支。它会拒绝包含 tracked 或 untracked 改动的
 worktree，核验 ledger 中记录的完整 Orca worktree identity、当前分支和 HEAD，通过
 Orca 删除 worktree（同时关闭其中 terminals），最后清除 ledger 中失效的运行时句柄。
 省略 `--job` 时，会把已审阅的计划应用到全部符合条件的终态 job。
+
+当最终审计失败，但存在新近发现且可处理的 blocker 时，只能通过 `reopen` 继续。它默认
+只预览；`reopen --execute --reason "..."` 会记录人工原因、保留失败审计证据、派发返工，
+并且只重跑该最终审计轮，不会静默增加审计轮次上限。
+
+`cleanup --docker` 只删除 label 能证明属于终态 Harness worktree 的 Compose 容器、网络
+和卷；不会删除共享的 image 或 build cache。可选的 `--legacy` 还会识别历史的
+`.../orca/workspaces/REPO/issue-N` 路径。执行前必须先审阅 preview。
 
 ## 参考
 
