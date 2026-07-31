@@ -384,6 +384,49 @@ test("blocked malformed audit routes to a fresh explicit recovery", () => {
   }
 });
 
+test("blocked exhausted audit provider routes only a same-HEAD, result-less audit to explicit recovery", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "head",
+      head_sha: "head",
+      last_error: "provider request failed after Pi exhausted its retries",
+    }),
+    {
+      worktreeExists: true,
+      auditArtifactStatus: "missing",
+      auditResultReady: false,
+      auditTaskStatus: "dispatched",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_exhausted_provider");
+  }
+
+  assert.equal(
+    reconcileJob(
+      job({
+        state: "blocked", auditor_task_id: "task-audit", audit_round: 1,
+        audit_head_sha: "head", head_sha: "head",
+        last_error: "provider request failed after Pi exhausted its retries",
+      }),
+      {
+        worktreeExists: true, auditArtifactStatus: "missing", auditResultReady: false,
+        auditTaskStatus: "dispatched", baseIsAncestor: true, trackedClean: true,
+        currentHeadSha: "other-head",
+      },
+    ).kind,
+    "blocked",
+  );
+});
+
 test("blocked stale audit retries against a newer clean HEAD", () => {
   const action = reconcileJob(
     job({

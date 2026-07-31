@@ -19,6 +19,7 @@ import { loadRuntimeConfig, validateProjectRuntime } from "./project.js";
 import {
   classifyRecoverExecution,
   isTimedOutReworkWithoutNewCommit,
+  isExhaustedAuditProviderError,
   isStaleReworkTaskStatusError,
   reconcileJob,
   REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
@@ -234,6 +235,40 @@ export function runRecoveryCycle(options: {
       }
       if (
         !recoveryError &&
+        action.recovery === "retry_exhausted_provider" &&
+        job.worktree_path &&
+        job.base_sha &&
+        head
+      ) {
+        if (!job.auditor_task_id || job.audit_round <= 0) {
+          recoveryError =
+            "cannot retry exhausted audit provider without auditor and audit-round provenance";
+        } else if (!isExhaustedAuditProviderError(job.last_error)) {
+          recoveryError =
+            "exhausted audit provider recovery requires the exact provider retry error";
+        } else if (!['dispatched', 'failed'].includes(hints.auditTaskStatus?.toLowerCase() ?? '')) {
+          recoveryError =
+            "cannot retry exhausted audit provider before the failed auditor is confirmed inactive";
+        } else if (job.audit_head_sha !== head || job.head_sha !== head) {
+          recoveryError =
+            "exhausted audit provider recovery requires same-HEAD audit provenance";
+        } else if (hints.trackedClean !== true) {
+          recoveryError =
+            "cannot retry exhausted audit provider with tracked changes";
+        } else {
+          const artifact = inspectAuditArtifact(
+            join(job.worktree_path, ".harness", "audit-result.json"),
+            job.base_sha,
+            head,
+          );
+          if (artifact.status !== "missing") {
+            recoveryError =
+              `cannot retry exhausted audit provider after audit artifact changed to ${artifact.status}`;
+          }
+        }
+      }
+      if (
+        !recoveryError &&
         action.recovery === "resume_completed_rework" &&
         job.worktree_path &&
         head
@@ -354,7 +389,8 @@ export function runRecoveryCycle(options: {
         action.recovery === "retry_malformed_result" ||
         action.recovery === "retry_validation_only_rework" ||
         action.recovery === "retry_stale_result" ||
-        action.recovery === "resume_completed_rework"
+        action.recovery === "resume_completed_rework" ||
+        action.recovery === "retry_exhausted_provider"
       ) {
         ledger.updateJob(job.id, {
           state:
