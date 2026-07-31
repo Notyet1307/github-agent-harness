@@ -56,6 +56,7 @@ type AuditFixtureMode =
   | "rework-stuck-artifact-race"
   | "rework-stuck-task-race"
   | "audit-retry"
+  | "audit-lost-worker-done"
   | "audit-retry-lock-wait"
   | "audit-retry-artifact-race"
   | "audit-infra-retry";
@@ -93,6 +94,35 @@ test("a fresh audit round blocks and keeps an incomplete dispatch tuple", (t) =>
   );
   assert.equal(verified.getJob("job-audit")?.auditor_dispatch_id, null);
   assert.equal(verified.getJob("job-audit")?.dispatch_attempt, 1);
+  verified.close();
+});
+
+test("audit continues when completed same-round evidence arrives without worker_done", (t) => {
+  const fixture = createAuditFixture(
+    (baseSha, headSha) => auditResult("pass", baseSha, headSha),
+    "audit-lost-worker-done",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    state: "awaiting_audit",
+    base_sha: fixture.baseSha,
+    worktree_id: "worktree-1",
+    worktree_path: fixture.worktree,
+    head_sha: fixture.headSha,
+  });
+  ledger.close();
+
+  const result = auditOnce({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    withRework: false,
+  });
+
+  assert.equal(result.ok, true, result.message);
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
   verified.close();
 });
 
@@ -1541,12 +1571,14 @@ appendFileSync(join(dir, "calls.jsonl"), JSON.stringify(args) + "\\n");
 const mode = readFileSync(join(dir, "mode"), "utf8");
 const reworkMode = mode.startsWith("rework-");
 const auditRetryMode = mode.startsWith("audit-retry");
+const lostAuditWorkerDoneMode = mode === "audit-lost-worker-done";
 const auditInfrastructureRetryMode = mode === "audit-infra-retry";
 const stuckReworkRetryMode =
   mode === "rework-stuck-retry" ||
   mode === "rework-stuck-artifact-race" ||
   mode === "rework-stuck-task-race";
-const freshAuditMode = auditRetryMode || auditInfrastructureRetryMode;
+const freshAuditMode =
+  auditRetryMode || lostAuditWorkerDoneMode || auditInfrastructureRetryMode;
 const statePath = join(dir, "state.json");
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const key = args.slice(0, 2).join(" ");
@@ -1684,6 +1716,9 @@ if (args[0] === "status") {
   console.log(JSON.stringify({ ok: true, result: {
     tasks: [
       { id: "task-audit", status: "completed" },
+      ...(lostAuditWorkerDoneMode
+        ? [{ id: "task-audit-new", status: "completed" }]
+        : []),
       {
         id: "task-rework",
         status:
@@ -1772,6 +1807,10 @@ if (args[0] === "status") {
 ) {
   state.checks += 1;
   writeFileSync(statePath, JSON.stringify(state));
+  if (lostAuditWorkerDoneMode) {
+    console.log(JSON.stringify({ ok: true, result: { messages: [] } }));
+    process.exit(0);
+  }
   if (freshAuditMode) {
     console.log(JSON.stringify({ ok: true, result: { messages: [{
       type: "worker_done",
