@@ -412,9 +412,7 @@ test("blocked exhausted audit provider routes only a same-HEAD, result-less audi
       audit_round: 1,
       audit_head_sha: "head",
       head_sha: "head",
-      last_error:
-        "provider request failed after Pi exhausted its retries; " +
-        REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+      last_error: "provider request failed after Pi exhausted its retries",
     }),
     {
       worktreeExists: true,
