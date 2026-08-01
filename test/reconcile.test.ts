@@ -627,6 +627,38 @@ test("timed-out zero-commit rework requires explicit recovery and a stale failed
   assert.equal(classifyRecoverExecution(action, "blocked"), "explicit_recovery");
 });
 
+test("exhausted rework provider requires explicit recovery after its stale task fails", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-rework",
+      implementer_dispatch_id: "dispatch-rework",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error:
+        "provider request failed after Pi exhausted its retries; " +
+        REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+    }),
+    {
+      worktreeExists: true,
+      currentHeadSha: "audited-head",
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      implementTaskStatus: "failed",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_exhausted_rework_provider");
+  }
+  assert.equal(classifyRecoverExecution(action, "blocked"), "explicit_recovery");
+});
+
 test("timed-out rework recovery stays blocked unless its stale task and provenance are verified", () => {
   for (const hints of [
     { implementTaskStatus: "working" },

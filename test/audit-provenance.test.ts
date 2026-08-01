@@ -1452,6 +1452,49 @@ test("recover explicitly redispatches a timed-out rework after its stale task fa
   assert.match(taskCreates[0]!.join(" "), /wrong behavior/);
 });
 
+test("recover explicitly redispatches a rework whose provider exhausted retries", (t) => {
+  const fixture = createAuditFixture(
+    actionableAuditFailure,
+    "rework-stuck-retry",
+  );
+  t.after(() => rmSync(fixture.dir, { recursive: true, force: true }));
+  markTimedOutReworkBlocked(fixture);
+
+  const ledger = new Ledger(fixture.ledgerPath);
+  ledger.updateJob("job-audit", {
+    last_error:
+      "provider request failed after Pi exhausted its retries; " +
+      REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
+  });
+  ledger.close();
+
+  const dryRun = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: true,
+  });
+  assert.equal(dryRun.action.kind, "audit_once");
+  if (dryRun.action.kind === "audit_once") {
+    assert.equal(dryRun.action.recovery, "retry_exhausted_rework_provider");
+  }
+
+  const recovered = recover({
+    configPath: fixture.configPath,
+    ledgerPath: fixture.ledgerPath,
+    lockPath: join(fixture.dir, "harness.lock"),
+    dryRun: false,
+  });
+  assert.equal(recovered.ok, true, recovered.message);
+  assert.equal(recovered.action.kind, "audit_once");
+  if (recovered.action.kind === "audit_once") {
+    assert.equal(recovered.action.recovery, "retry_exhausted_rework_provider");
+  }
+  const verified = new Ledger(fixture.ledgerPath);
+  assert.equal(verified.getJob("job-audit")?.state, "audit_passed");
+  verified.close();
+});
+
 test("timed-out rework recovery rechecks that the stale task is still failed", (t) => {
   const fixture = createAuditFixture(
     actionableAuditFailure,

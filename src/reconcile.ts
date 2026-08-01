@@ -52,6 +52,16 @@ export function isExhaustedAuditProviderError(error: string | null): boolean {
   );
 }
 
+/** A rework dispatch can fail before Pi creates a commit. */
+export function isExhaustedReworkProviderError(error: string | null): boolean {
+  return Boolean(
+    error &&
+      /^(?:provider request|provider Responses stream) failed after Pi exhausted its retries; rework produced no commits after audited HEAD$/.test(
+        error,
+      ),
+  );
+}
+
 /**
  * Pure recovery routing for M5.
  * Controllers map each non-terminal state to the next safe command.
@@ -68,6 +78,7 @@ export type RecoverAction =
       recovery?:
         | "retry_malformed_result"
         | "retry_stuck_rework"
+        | "retry_exhausted_rework_provider"
         | "retry_validation_only_rework"
         | "retry_stale_result"
         | "resume_completed_rework"
@@ -358,6 +369,28 @@ export function reconcileJob(
           reason:
             "timed-out zero-commit rework has a failed stale task; explicit recovery may redispatch the same issue",
           recovery: "retry_stuck_rework",
+        };
+      }
+      if (
+        job.implementer_task_id &&
+        job.implementer_dispatch_id &&
+        job.audit_round > 0 &&
+        isExhaustedReworkProviderError(job.last_error) &&
+        job.audit_head_sha === hints.currentHeadSha &&
+        job.head_sha === hints.currentHeadSha &&
+        hints.worktreeExists === true &&
+        hints.hasCommitsSinceBase === true &&
+        hints.auditArtifactStatus === "current" &&
+        hints.auditResultReady === true &&
+        hints.implementTaskStatus?.toLowerCase() === "failed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "rework implementer exhausted provider retries without a commit; explicit recovery may redispatch the same issue",
+          recovery: "retry_exhausted_rework_provider",
         };
       }
       if (
