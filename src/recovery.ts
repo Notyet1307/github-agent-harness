@@ -20,6 +20,7 @@ import {
   classifyRecoverExecution,
   isTimedOutReworkWithoutNewCommit,
   isExhaustedAuditProviderError,
+  isExhaustedReworkProviderError,
   isStaleReworkTaskStatusError,
   reconcileJob,
   REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
@@ -361,6 +362,43 @@ export function runRecoveryCycle(options: {
           }
         }
       }
+      if (
+        !recoveryError &&
+        action.recovery === "retry_exhausted_rework_provider"
+      ) {
+        if (!job.worktree_path || !job.base_sha || !head) {
+          recoveryError =
+            "cannot retry exhausted rework provider without a readable worktree, base, and HEAD";
+        } else if (!job.implementer_task_id || !job.implementer_dispatch_id) {
+          recoveryError =
+            "cannot retry exhausted rework provider without the failed task and dispatch identity";
+        } else if (hints.implementTaskStatus?.toLowerCase() !== "failed") {
+          recoveryError =
+            "cannot retry exhausted rework provider before the stale task is confirmed failed";
+        } else if (
+          !isExhaustedReworkProviderError(job.last_error) ||
+          job.audit_round <= 0 ||
+          job.audit_head_sha !== head ||
+          job.head_sha !== head
+        ) {
+          recoveryError =
+            "cannot retry exhausted rework provider without same-audited-HEAD provenance";
+        } else {
+          const artifact = inspectAuditArtifact(
+            join(job.worktree_path, ".harness", "audit-result.json"),
+            job.base_sha,
+            head,
+          );
+          const dirty = trackedDirty(job.worktree_path);
+          if (dirty) {
+            recoveryError =
+              `cannot retry exhausted rework provider with tracked changes:\n${dirty}`;
+          } else if (artifact.status !== "current") {
+            recoveryError =
+              `cannot retry exhausted rework provider after audit artifact changed to ${artifact.status}`;
+          }
+        }
+      }
       if (recoveryError) {
         ledger.updateJob(job.id, {
           state: "blocked",
@@ -372,7 +410,10 @@ export function runRecoveryCycle(options: {
           message: recoveryError,
         };
       }
-      if (action.recovery === "retry_stuck_rework") {
+      if (
+        action.recovery === "retry_stuck_rework" ||
+        action.recovery === "retry_exhausted_rework_provider"
+      ) {
         // Preserve the audited artifact/result for the rework prompt, but forget
         // the terminal task identity so auditOnce can create a new rework task.
         ledger.updateJob(job.id, {
