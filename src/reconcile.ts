@@ -38,7 +38,7 @@ export function isStaleImplementationTaskStatusError(
   );
 }
 
-/** A timed-out initial implementation may need an explicit verification handoff. */
+/** A timed-out implementation may need an explicit verification handoff. */
 export function isTimedOutImplementationTaskError(
   error: string | null,
   taskId: string | null,
@@ -47,6 +47,22 @@ export function isTimedOutImplementationTaskError(
     error &&
       taskId &&
       error === `timeout waiting for worker_done on task ${taskId}`,
+  );
+}
+
+/**
+ * A failed implementation that left a clean commit may be continued only when
+ * the controller's recorded error identifies the same task (timeout) or a
+ * stale dispatched-task observation. The continuation must still verify and
+ * produce worker_done; commits alone never complete the job.
+ */
+export function isRecoverableImplementationContinuationError(
+  error: string | null,
+  taskId: string | null,
+): boolean {
+  return (
+    isTimedOutImplementationTaskError(error, taskId) ||
+    isStaleImplementationTaskStatusError(error)
   );
 }
 
@@ -251,21 +267,9 @@ export function reconcileJob(
         ["completed", "failed"].includes(implementTaskStatus),
       );
       if (
-        implementationEnded &&
-        implementTaskStatus === "failed" &&
-        hints.hasCommitsSinceBase === true
-      ) {
-        return {
-          kind: "blocked",
-          reason:
-            `implementation task ${job.implementer_task_id} failed; ` +
-            "commits cannot substitute for task completion",
-        };
-      }
-      if (
         job.implementer_task_id &&
         job.implementer_dispatch_id &&
-        isTimedOutImplementationTaskError(
+        isRecoverableImplementationContinuationError(
           job.last_error,
           job.implementer_task_id,
         ) &&
@@ -278,7 +282,19 @@ export function reconcileJob(
         return {
           kind: "continue_implement",
           reason:
-            "timed-out implementation left clean commits after its failed task; explicit recovery may dispatch a verification continuation",
+            "failed implementation left clean commits after its task became unrecoverable; explicit recovery may dispatch a verification continuation",
+        };
+      }
+      if (
+        implementationEnded &&
+        implementTaskStatus === "failed" &&
+        hints.hasCommitsSinceBase === true
+      ) {
+        return {
+          kind: "blocked",
+          reason:
+            `implementation task ${job.implementer_task_id} failed; ` +
+            "commits cannot substitute for task completion",
         };
       }
       if (

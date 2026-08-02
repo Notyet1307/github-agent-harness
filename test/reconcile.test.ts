@@ -308,6 +308,27 @@ test("timed-out implementation with clean commits requires an explicit verificat
   assert.equal(classifyRecoverExecution(a, "blocked"), "explicit_recovery");
 });
 
+test("failed stale implementation with clean commits requires an explicit verification continuation", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      implementer_dispatch_id: "dispatch-implement",
+      last_error:
+        "implementation task task-implement is not completed (Orca status=dispatched)",
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      implementTaskStatus: "failed",
+    },
+  );
+
+  assert.equal(a.kind, "continue_implement");
+});
+
 test("completed implementation with divergent HEAD cannot be finalized", () => {
   const a = reconcileJob(
     job({
