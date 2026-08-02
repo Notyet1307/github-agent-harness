@@ -38,6 +38,18 @@ export function isStaleImplementationTaskStatusError(
   );
 }
 
+/** A timed-out initial implementation may need an explicit verification handoff. */
+export function isTimedOutImplementationTaskError(
+  error: string | null,
+  taskId: string | null,
+): boolean {
+  return Boolean(
+    error &&
+      taskId &&
+      error === `timeout waiting for worker_done on task ${taskId}`,
+  );
+}
+
 /**
  * Pi has already consumed its own bounded provider retries. This is distinct
  * from an audit finding: no result was produced, so a fresh auditor is needed
@@ -72,6 +84,7 @@ export type RecoverAction =
   | { kind: "run_once"; reason: string }
   | { kind: "finalize_implement"; reason: string }
   | { kind: "retry_implement"; reason: string }
+  | { kind: "continue_implement"; reason: string }
   | {
       kind: "audit_once";
       reason: string;
@@ -103,6 +116,7 @@ export function classifyRecoverExecution(
   if (
     action.kind === "retry_implement" ||
     action.kind === "finalize_implement" ||
+    action.kind === "continue_implement" ||
     (state === "blocked" && action.kind === "audit_once") ||
     action.kind === "resolve_intervention"
   ) {
@@ -246,6 +260,25 @@ export function reconcileJob(
           reason:
             `implementation task ${job.implementer_task_id} failed; ` +
             "commits cannot substitute for task completion",
+        };
+      }
+      if (
+        job.implementer_task_id &&
+        job.implementer_dispatch_id &&
+        isTimedOutImplementationTaskError(
+          job.last_error,
+          job.implementer_task_id,
+        ) &&
+        implementTaskStatus === "failed" &&
+        hints.worktreeExists === true &&
+        hints.hasCommitsSinceBase === true &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "continue_implement",
+          reason:
+            "timed-out implementation left clean commits after its failed task; explicit recovery may dispatch a verification continuation",
         };
       }
       if (
