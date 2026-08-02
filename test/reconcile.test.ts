@@ -515,6 +515,32 @@ test("blocked stale audit retries against a newer clean HEAD", () => {
   }
 });
 
+test("blocked audit snapshot mismatch retries against the committed descendant", () => {
+  const action = reconcileJob(
+    job({
+      state: "blocked",
+      auditor_task_id: "task-audit",
+      audit_round: 1,
+      audit_head_sha: "audited-head",
+      head_sha: "audited-head",
+      last_error: "HEAD changed during audit: audited-head → newer-head",
+    }),
+    {
+      auditArtifactStatus: "current",
+      auditResultReady: true,
+      auditTaskStatus: "completed",
+      baseIsAncestor: true,
+      trackedClean: true,
+      currentHeadSha: "newer-head",
+    },
+  );
+
+  assert.equal(action.kind, "audit_once");
+  if (action.kind === "audit_once") {
+    assert.equal(action.recovery, "retry_snapshot_mismatch");
+  }
+});
+
 test("blocked transient push failure retries publishing with current audit evidence", () => {
   const action = reconcileJob(
     job({

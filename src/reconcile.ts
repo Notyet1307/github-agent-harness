@@ -26,6 +26,14 @@ export function isStaleReworkTaskStatusError(error: string | null): boolean {
   );
 }
 
+/**
+ * The auditor completed, but its immutable snapshot was invalidated by a
+ * committed HEAD change before the final gate check.
+ */
+export function isAuditHeadChangedError(error: string | null): boolean {
+  return Boolean(error?.startsWith("HEAD changed during audit: "));
+}
+
 /** A completed implementation can race a transient dispatched-task observation. */
 export function isStaleImplementationTaskStatusError(
   error: string | null,
@@ -110,6 +118,7 @@ export type RecoverAction =
         | "retry_exhausted_rework_provider"
         | "retry_validation_only_rework"
         | "retry_stale_result"
+        | "retry_snapshot_mismatch"
         | "resume_completed_rework"
         | "retry_exhausted_provider";
     }
@@ -460,6 +469,26 @@ export function reconcileJob(
           reason:
             "completed validation-only rework may explicitly dispatch a fresh auditor for the same HEAD",
           recovery: "retry_validation_only_rework",
+        };
+      }
+      if (
+        job.auditor_task_id &&
+        job.audit_round > 0 &&
+        job.audit_head_sha &&
+        job.head_sha === job.audit_head_sha &&
+        isAuditHeadChangedError(job.last_error) &&
+        typeof hints.currentHeadSha === "string" &&
+        job.audit_head_sha !== hints.currentHeadSha &&
+        hints.auditArtifactStatus === "current" &&
+        hints.auditTaskStatus?.toLowerCase() === "completed" &&
+        hints.baseIsAncestor === true &&
+        hints.trackedClean === true
+      ) {
+        return {
+          kind: "audit_once",
+          reason:
+            "audit snapshot changed after dispatch; dispatch a fresh audit for the clean descendant",
+          recovery: "retry_snapshot_mismatch",
         };
       }
       if (

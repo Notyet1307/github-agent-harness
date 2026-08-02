@@ -21,6 +21,7 @@ import {
   isTimedOutReworkWithoutNewCommit,
   isExhaustedAuditProviderError,
   isExhaustedReworkProviderError,
+  isAuditHeadChangedError,
   isStaleReworkTaskStatusError,
   reconcileJob,
   REWORK_NO_COMMITS_AFTER_AUDITED_HEAD_ERROR,
@@ -190,13 +191,18 @@ export function runRecoveryCycle(options: {
       if (
         !recoveryError &&
         (action.recovery === "retry_malformed_result" ||
-          action.recovery === "retry_stale_result") &&
+          action.recovery === "retry_stale_result" ||
+          action.recovery === "retry_snapshot_mismatch") &&
         job.worktree_path &&
         job.base_sha &&
         head
       ) {
         const expectedArtifactStatus =
-          action.recovery === "retry_malformed_result" ? "malformed" : "stale";
+          action.recovery === "retry_malformed_result"
+            ? "malformed"
+            : action.recovery === "retry_snapshot_mismatch"
+              ? "current"
+              : "stale";
         if (!job.auditor_task_id) {
           recoveryError =
             `cannot recover ${expectedArtifactStatus} audit without the completed auditor task`;
@@ -218,6 +224,14 @@ export function runRecoveryCycle(options: {
         ) {
           recoveryError =
             "cannot recover stale audit without a newer committed HEAD";
+        } else if (
+          action.recovery === "retry_snapshot_mismatch" &&
+          (job.audit_head_sha === head ||
+            job.head_sha !== job.audit_head_sha ||
+            !isAuditHeadChangedError(job.last_error))
+        ) {
+          recoveryError =
+            "cannot recover audit snapshot mismatch without changed-HEAD provenance";
         } else {
           const artifact = inspectAuditArtifact(
             join(job.worktree_path, ".harness", "audit-result.json"),
@@ -228,7 +242,13 @@ export function runRecoveryCycle(options: {
           if (dirty) {
             recoveryError =
               `cannot recover ${expectedArtifactStatus} audit with tracked changes:\n${dirty}`;
-          } else if (artifact.status !== expectedArtifactStatus) {
+          } else if (
+            action.recovery === "retry_snapshot_mismatch"
+              ? artifact.status !== "current" ||
+                artifact.result.status !== "uncertain" ||
+                artifact.result.uncertain_reason !== "snapshot_mismatch"
+              : artifact.status !== expectedArtifactStatus
+          ) {
             recoveryError =
               `cannot recover ${expectedArtifactStatus} audit after artifact changed to ${artifact.status}`;
           }
@@ -431,7 +451,8 @@ export function runRecoveryCycle(options: {
         action.recovery === "retry_validation_only_rework" ||
         action.recovery === "retry_stale_result" ||
         action.recovery === "resume_completed_rework" ||
-        action.recovery === "retry_exhausted_provider"
+        action.recovery === "retry_exhausted_provider" ||
+        action.recovery === "retry_snapshot_mismatch"
       ) {
         ledger.updateJob(job.id, {
           state:
