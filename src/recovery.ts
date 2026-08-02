@@ -726,10 +726,12 @@ function executeAction(
   switch (action.kind) {
     case "run_once":
     case "finalize_implement":
-    case "retry_implement": {
+    case "retry_implement":
+    case "continue_implement": {
       const recoversBlockedImplementation =
         action.kind === "retry_implement" ||
-        action.kind === "finalize_implement";
+        action.kind === "finalize_implement" ||
+        action.kind === "continue_implement";
       if (
         recoversBlockedImplementation &&
         (!opts.jobId || !opts.implementerTaskId)
@@ -750,7 +752,11 @@ function executeAction(
           recoversBlockedImplementation
             ? {
                 action:
-                  action.kind === "retry_implement" ? "retry" : "finalize",
+                  action.kind === "retry_implement"
+                    ? "retry"
+                    : action.kind === "continue_implement"
+                      ? "continue"
+                      : "finalize",
                 jobId: opts.jobId!,
                 taskId: opts.implementerTaskId!,
                 dispatchId: opts.implementerDispatchId ?? null,

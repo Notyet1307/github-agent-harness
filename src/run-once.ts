@@ -25,6 +25,7 @@ import { renderImplementerSpec } from "./prompts.js";
 import {
   IMPLEMENT_NO_COMMITS_ERROR,
   isStaleImplementationTaskStatusError,
+  isTimedOutImplementationTaskError,
 } from "./reconcile.js";
 import { requireOrcaCli, orcaStatus } from "./orca.js";
 import {
@@ -47,7 +48,7 @@ export type RunOnceResult = {
 };
 
 type BlockedImplementationRecovery = {
-  action: "retry" | "finalize";
+  action: "retry" | "finalize" | "continue";
   jobId: string;
   taskId: string;
   dispatchId: string | null;
@@ -132,7 +133,11 @@ function runOnceLocked(
       job.id !== blockedRecovery.jobId ||
       job.state !== "blocked" ||
       (job.last_error !== IMPLEMENT_NO_COMMITS_ERROR &&
-        !isStaleImplementationTaskStatusError(job.last_error)) ||
+        !isStaleImplementationTaskStatusError(job.last_error) &&
+        !isTimedOutImplementationTaskError(
+          job.last_error,
+          blockedRecovery.taskId,
+        )) ||
       job.implementer_task_id !== blockedRecovery.taskId ||
       job.implementer_dispatch_id !== blockedRecovery.dispatchId)
   ) {
@@ -161,7 +166,8 @@ function runOnceLocked(
       };
     }
     if (
-      blockedRecovery.action === "retry" &&
+      (blockedRecovery.action === "retry" ||
+        blockedRecovery.action === "continue") &&
       taskStatus !== "completed" &&
       taskStatus !== "failed"
     ) {
@@ -241,7 +247,26 @@ function runOnceLocked(
           job = ledger.updateJob(job.id, { last_error: error });
           return { ok: false, jobId: job.id, message: error };
         }
-        if (headSha !== baseSha) {
+        if (blockedRecovery.action === "continue") {
+          const commits = commitCountSince(worktreePath!, baseSha);
+          if (headSha === baseSha || commits < 1 || tracked.stdout) {
+            const error =
+              "implementation continuation revalidation requires clean commits since base";
+            job = ledger.updateJob(job.id, { last_error: error });
+            return { ok: false, jobId: job.id, message: error };
+          }
+          log("explicitly continuing timed-out implementation from its clean commits");
+          job = ledger.updateJob(job.id, {
+            state: "implementing",
+            implementer_terminal_handle: null,
+            implementer_task_id: null,
+            implementer_dispatch_id: null,
+            dispatch_attempt: 0,
+            dispatch_probe_pending: 0,
+            last_error: null,
+            head_sha: headSha,
+          });
+        } else if (headSha !== baseSha) {
           const commits = commitCountSince(worktreePath!, baseSha);
           if (commits < 1 || tracked.stdout) {
             const error =
@@ -568,6 +593,7 @@ function runOnceLocked(
           job.worktree_id,
           implementer,
           `issue-${job.issue_number}-${implementer.orcaAgent}`,
+          { forceNew: blockedRecovery?.action === "continue" },
         )
       : null;
     if (
@@ -605,16 +631,19 @@ function runOnceLocked(
     }
     const dispatchBaseSha = job.base_sha;
     const dispatchWorktreePath = job.worktree_path;
+    const continuationHeadSha =
+      blockedRecovery?.action === "continue" ? job.head_sha : null;
     const allowedTrackedChanges =
       blockedRecovery?.action === "retry"
         ? trackedDirty(dispatchWorktreePath)
         : null;
     const dispatchFixedPointError = (): string | null => {
       const head = revParse(dispatchWorktreePath, "HEAD");
-      if (head !== dispatchBaseSha) {
+      const expectedHead = continuationHeadSha ?? dispatchBaseSha;
+      if (head !== expectedHead) {
         return (
           "implementation HEAD changed before implementation dispatch: " +
-          `expected ${dispatchBaseSha}, got ${head ?? "unreadable"}`
+          `expected ${expectedHead}, got ${head ?? "unreadable"}`
         );
       }
       const dirty = trackedDirty(dispatchWorktreePath);
@@ -628,7 +657,7 @@ function runOnceLocked(
         : null;
     };
 
-    const spec = renderImplementerSpec({
+    const spec = `${renderImplementerSpec({
       repo: repo.github,
       issueNumber: job.issue_number,
       issueUrl: job.issue_url,
@@ -638,7 +667,11 @@ function runOnceLocked(
       profileId: implementer.id,
       orcaAgent: implementer.orcaAgent,
       invokeHint: implementer.invokeHint,
-    });
+    })}${
+      continuationHeadSha
+        ? `\n\n## Continuation recovery\n\nA prior implementer timed out after creating clean commits. Treat HEAD \`${continuationHeadSha}\` as the fixed continuation point: inspect the existing diff, run the required validation and internal review, make only necessary follow-up commits, then send a complete \`worker_done\`. Do not discard or rewrite the existing commits.\n`
+        : ""
+    }`;
 
     const jobId = job.id;
     const worktreeId = job.worktree_id;

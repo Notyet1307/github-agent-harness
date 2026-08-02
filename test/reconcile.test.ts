@@ -287,6 +287,27 @@ test("completed implementation recovers after a stale dispatched-task observatio
   assert.equal(a.kind, "finalize_implement");
 });
 
+test("timed-out implementation with clean commits requires an explicit verification continuation", () => {
+  const a = reconcileJob(
+    job({
+      state: "blocked",
+      implementer_task_id: "task-implement",
+      implementer_dispatch_id: "dispatch-implement",
+      last_error: "timeout waiting for worker_done on task task-implement",
+    }),
+    {
+      worktreeExists: true,
+      hasCommitsSinceBase: true,
+      baseIsAncestor: true,
+      trackedClean: true,
+      implementTaskStatus: "failed",
+    },
+  );
+
+  assert.equal(a.kind, "continue_implement");
+  assert.equal(classifyRecoverExecution(a, "blocked"), "explicit_recovery");
+});
+
 test("completed implementation with divergent HEAD cannot be finalized", () => {
   const a = reconcileJob(
     job({
